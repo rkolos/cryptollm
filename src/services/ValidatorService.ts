@@ -518,12 +518,12 @@ export class ValidatorService {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public validateDecision(
     decision: LLMDecision,
     accountState: AccountState,
     strategyContext: StrategyContext,
     marketData: MarketData,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _exchangeRules: IMarketRules,
   ): CalculatedAmounts {
     this.logger.debug(`Validating decision: ${decision.action} for ${decision.pair}`);

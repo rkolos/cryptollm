@@ -12,9 +12,16 @@ export interface OpenPosition {
   stop_loss_price: DecimalValue | null;
 }
 
+export interface AssetBalance {
+  asset: string;
+  total: DecimalValue;
+  available: DecimalValue;
+}
+
 export interface AccountState {
   total_portfolio_value_usdt: DecimalValue;
   available_quote_balance: DecimalValue;
+  assets: AssetBalance[];
   open_positions: OpenPosition[];
   open_orders: unknown[];
 }

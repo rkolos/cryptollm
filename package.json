@@ -21,6 +21,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/eventemitter3": "^2.0.4",
     "@types/node": "^20.19.24",
     "@types/pg": "^8.11.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
@@ -40,6 +41,7 @@
     "ccxt": "^4.5.14",
     "decimal.js": "^10.6.0",
     "dotenv": "^17.2.3",
+    "eventemitter3": "^5.0.1",
     "pg": "^8.16.3",
     "technicalindicators": "^3.1.0",
     "uuid": "^13.0.0",

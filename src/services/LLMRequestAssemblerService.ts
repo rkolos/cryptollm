@@ -372,12 +372,13 @@ export class LLMRequestAssemblerService {
         max_total_portfolio_risk_percent: riskRules.maxTotalPortfolioRiskPercent,
         desired_risk_reward_ratio: riskRules.desiredRiskRewardRatio,
       },
-      macro_context: macroContext.fear_and_greed_index !== null
-        ? {
-            fear_and_greed_index: macroContext.fear_and_greed_index,
-            fear_and_greed_text: macroContext.fear_and_greed_text || '',
-          }
-        : undefined,
+      macro_context:
+        macroContext.fear_and_greed_index !== null
+          ? {
+              fear_and_greed_index: macroContext.fear_and_greed_index,
+              fear_and_greed_text: macroContext.fear_and_greed_text || '',
+            }
+          : undefined,
       watchlist,
     };
 
@@ -414,10 +415,7 @@ export class LLMRequestAssemblerService {
     }
 
     // Сначала заменяем OUTPUT_SCHEMA
-    let userPrompt = this.promptCache.userTemplate.replace(
-      '{{OUTPUT_SCHEMA_MD}}',
-      this.promptCache.outputSchema,
-    );
+    let userPrompt = this.promptCache.userTemplate.replace('{{OUTPUT_SCHEMA_MD}}', this.promptCache.outputSchema);
 
     // Заменяем остальные плейсхолдеры
     userPrompt = userPrompt.replace('{{TRIGGERED_PAIR}}', triggeredPair);
@@ -444,4 +442,3 @@ export class LLMRequestAssemblerService {
     return userPrompt;
   }
 }
-

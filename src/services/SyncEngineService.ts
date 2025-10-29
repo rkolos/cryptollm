@@ -22,6 +22,9 @@ interface DbOrder {
   price: string;
   amount: string;
   created_at: Date;
+  target_stop_loss_price?: string | null;
+  target_take_profit_price?: string | null;
+  target_trailing_stop_json?: unknown | null;
 }
 
 interface DbPosition {
@@ -423,15 +426,239 @@ export class SyncEngineService {
     return baseAsset;
   }
 
-  // (STUB - Задача 5.1.2: Логика Сверки - Исполнение OPEN_LIMIT)
+  // (Задача 5.1.2: Логика Сверки - Исполнение OPEN_LIMIT)
   private async _reconcileOpenLimitOrders(
     pair: string,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _exchangeOrders: IDecimalOrder[],
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _dbOrders: DbOrder[],
+    exchangeOrders: IDecimalOrder[],
+    dbOrders: DbOrder[],
   ): Promise<void> {
-    this.logger.debug(`[${pair}] (STUB) _reconcileOpenLimitOrders...`);
-    // Логика обработки частично/полностью исполненных OPEN_LIMIT будет здесь
+    // Поиск ордеров с type === 'limit_open' и status === 'open'
+    const limitOpenOrders = dbOrders.filter((o) => o.type === 'limit_open' && o.status === 'open');
+
+    if (limitOpenOrders.length === 0) {
+      return;
+    }
+
+    // Создаем Set для быстрого поиска ордеров на бирже
+    const exchangeOrderMap = new Map<string, IDecimalOrder>();
+    for (const order of exchangeOrders) {
+      exchangeOrderMap.set(order.id, order);
+    }
+
+    // Обрабатываем каждый limit_open ордер
+    for (const dbOrder of limitOpenOrders) {
+      const exchangeOrder = exchangeOrderMap.get(dbOrder.exchange_order_id);
+
+      // Условие конвертации: ордера нет на бирже ИЛИ ордер есть, но status === 'closed' и filled > 0
+      const shouldConvert =
+        !exchangeOrder ||
+        (exchangeOrder.status === 'closed' &&
+          exchangeOrder.filled &&
+          new DecimalConstructor(exchangeOrder.filled.toString()).greaterThan(0));
+
+      if (!shouldConvert) {
+        continue;
+      }
+
+      this.logger.info(
+        `[${pair}] Обнаружен исполненный limit_open ордер [${dbOrder.exchange_order_id}]. Конвертируем в активную позицию...`,
+      );
+
+      try {
+        // Шаг 1: Получение реальных деталей исполнения через fetchMyTrades
+        const trades = await this.exchangeService.fetchMyTrades(pair, undefined, 100);
+        const orderTrades = trades.filter((t) => t.order === dbOrder.exchange_order_id);
+
+        if (orderTrades.length === 0) {
+          this.logger.warn(
+            `[${pair}] Не найдено сделок для ордера [${dbOrder.exchange_order_id}]. Пропускаем конвертацию.`,
+          );
+          continue;
+        }
+
+        // Рассчитываем реальные значения
+        let realAmount = new DecimalConstructor(0);
+        let realCost = new DecimalConstructor(0);
+        let realFeeCost = new DecimalConstructor(0);
+        let feeCurrency = 'USDT';
+
+        for (const trade of orderTrades) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const amountDecimal = trade.amount as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const costDecimal = trade.cost as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const feeCostDecimal = trade.fee.cost as any;
+
+          realAmount = realAmount.plus(new DecimalConstructor(amountDecimal.toString()));
+          realCost = realCost.plus(new DecimalConstructor(costDecimal.toString()));
+          realFeeCost = realFeeCost.plus(new DecimalConstructor(feeCostDecimal.toString()));
+          if (trade.fee.currency) {
+            feeCurrency = trade.fee.currency;
+          }
+        }
+
+        const realEntryPrice = realCost.div(realAmount);
+
+        // Определяем сторону позиции
+        const positionSide: 'long' | 'short' = dbOrder.side === 'buy' ? 'long' : 'short';
+        const oppositeSide: 'buy' | 'sell' = dbOrder.side === 'buy' ? 'sell' : 'buy';
+
+        // Шаг 2: Создание SL/TP ордеров ДО транзакции БД
+        let slOrderId: string | null = null;
+        let tpOrderId: string | null = null;
+
+        if (dbOrder.target_stop_loss_price) {
+          try {
+            const slPrice = new DecimalConstructor(dbOrder.target_stop_loss_price);
+            // Используем STOP_LOSS_LIMIT для защиты от проскальзывания
+            const slOrder = await this.exchangeService.createOrder(
+              pair,
+              'STOP_LOSS_LIMIT',
+              oppositeSide,
+              realAmount as DecimalValue,
+              slPrice as DecimalValue,
+              { stopPrice: slPrice.toString() },
+            );
+            slOrderId = slOrder.id;
+            this.logger.info(`[${pair}] SL ордер [${slOrderId}] создан на бирже.`);
+          } catch (error) {
+            this.logger.error(`[${pair}] Ошибка при создании SL ордера:`, error);
+            // Продолжаем без SL, но логируем критическую ошибку
+          }
+        }
+
+        if (dbOrder.target_take_profit_price) {
+          try {
+            const tpPrice = new DecimalConstructor(dbOrder.target_take_profit_price);
+            // TP - это обычный Limit ордер
+            const tpOrder = await this.exchangeService.createOrder(
+              pair,
+              'limit',
+              oppositeSide,
+              realAmount as DecimalValue,
+              tpPrice as DecimalValue,
+            );
+            tpOrderId = tpOrder.id;
+            this.logger.info(`[${pair}] TP ордер [${tpOrderId}] создан на бирже.`);
+          } catch (error) {
+            this.logger.error(`[${pair}] Ошибка при создании TP ордера:`, error);
+            // Продолжаем без TP, но логируем критическую ошибку
+          }
+        }
+
+        // Шаг 3: Атомарное обновление БД
+        try {
+          await this.databaseService.executeInTransaction(async (client) => {
+            // 3.1. Удаляем старый limit_open ордер
+            await client.query('DELETE FROM ActiveOrders WHERE exchange_order_id = $1', [dbOrder.exchange_order_id]);
+
+            // 3.2. Вставляем новую ActivePosition
+            await client.query(
+              `INSERT INTO ActivePositions (pair, side, amount, average_entry_price, total_fee_cost, stop_loss_price)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (pair) DO UPDATE SET
+                 side = EXCLUDED.side,
+                 amount = EXCLUDED.amount,
+                 average_entry_price = EXCLUDED.average_entry_price,
+                 total_fee_cost = EXCLUDED.total_fee_cost,
+                 stop_loss_price = EXCLUDED.stop_loss_price`,
+              [
+                pair,
+                positionSide,
+                realAmount.toString(),
+                realEntryPrice.toString(),
+                realFeeCost.toString(),
+                dbOrder.target_stop_loss_price || null,
+              ],
+            );
+
+            // 3.3. Вставляем SL ордер, если был создан
+            if (slOrderId) {
+              await client.query(
+                `INSERT INTO ActiveOrders (exchange_order_id, pair, type, side, status, price, amount)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [
+                  slOrderId,
+                  pair,
+                  'stop_loss_limit',
+                  oppositeSide,
+                  'open',
+                  dbOrder.target_stop_loss_price,
+                  realAmount.toString(),
+                ],
+              );
+            }
+
+            // 3.4. Вставляем TP ордер, если был создан
+            if (tpOrderId) {
+              await client.query(
+                `INSERT INTO ActiveOrders (exchange_order_id, pair, type, side, status, price, amount)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [
+                  tpOrderId,
+                  pair,
+                  'take_profit_limit',
+                  oppositeSide,
+                  'open',
+                  dbOrder.target_take_profit_price,
+                  realAmount.toString(),
+                ],
+              );
+            }
+
+            // 3.5. Вставляем сделку в TradeHistory
+            // Используем последнюю сделку как основную для истории
+            const lastTrade = orderTrades[orderTrades.length - 1];
+            if (lastTrade) {
+              await client.query(
+                `INSERT INTO TradeHistory (timestamp, exchange_trade_id, exchange_order_id, pair, side, price, amount, fee_cost, fee_currency, realized_pnl_usd)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (exchange_trade_id) DO NOTHING`,
+                [
+                  new Date(lastTrade.timestamp),
+                  lastTrade.id,
+                  dbOrder.exchange_order_id,
+                  pair,
+                  dbOrder.side,
+                  realEntryPrice.toString(),
+                  realAmount.toString(),
+                  realFeeCost.toString(),
+                  feeCurrency,
+                  null, // realized_pnl_usd будет рассчитан позже
+                ],
+              );
+            }
+
+            // 3.6. Если был указан trailing_stop, создаем TSL_State
+            if (dbOrder.target_trailing_stop_json && slOrderId) {
+              const tslConfig = dbOrder.target_trailing_stop_json as { type: string; distance: number };
+              await client.query(
+                `INSERT INTO TSL_State (pair, current_stop_price, current_stop_order_id, price_seen, rule_config_json)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (pair) DO UPDATE SET
+                   current_stop_price = EXCLUDED.current_stop_price,
+                   current_stop_order_id = EXCLUDED.current_stop_order_id,
+                   price_seen = EXCLUDED.price_seen,
+                   rule_config_json = EXCLUDED.rule_config_json`,
+                [pair, dbOrder.target_stop_loss_price, slOrderId, realEntryPrice.toString(), JSON.stringify(tslConfig)],
+              );
+            }
+          });
+
+          this.logger.info(`[${pair}] Конвертация limit_open ордера [${dbOrder.exchange_order_id}] завершена успешно.`);
+        } catch (error) {
+          // КРИТИЧЕСКИЙ сбой: транзакция провалилась, но SL/TP уже созданы на бирже
+          this.logger.error(
+            `[${pair}] КРИТИЧЕСКИЙ СБОЙ: Транзакция БД провалилась после создания SL/TP ордеров. Ордера останутся как "зомби" и будут отменены на следующей итерации сверки.`,
+            error,
+          );
+          // Не пробрасываем ошибку дальше, чтобы не сломать SyncEngine
+        }
+      } catch (error) {
+        this.logger.error(`[${pair}] Ошибка при обработке limit_open ордера [${dbOrder.exchange_order_id}]:`, error);
+        // Продолжаем обработку других ордеров
+      }
+    }
   }
 }

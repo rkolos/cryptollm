@@ -271,6 +271,19 @@ export class NotificationService {
         FROM TradeHistory`,
       );
 
+      if (!summaryResult.rows || summaryResult.rows.length === 0) {
+        this.logger.warn('Empty result from trading summary query. Returning zero statistics.');
+        return {
+          totalTrades: 0,
+          closedPositions: 0,
+          totalRealizedPnl: new DecimalConstructor('0') as DecimalValue,
+          totalFees: new DecimalConstructor('0') as DecimalValue,
+          winRate: 0,
+          avgWin: new DecimalConstructor('0') as DecimalValue,
+          avgLoss: new DecimalConstructor('0') as DecimalValue,
+        };
+      }
+
       const summaryRow = summaryResult.rows[0];
       const totalTrades = parseInt(summaryRow.total_trades || '0', 10);
       const closedPositions = parseInt(summaryRow.total_closed || '0', 10);

@@ -257,7 +257,8 @@ export class LLMRequestAssemblerService {
     let finalCurrentPrice: DecimalValue;
     if (!currentPrice) {
       // Fallback: получаем цену из последнего OHLCV
-      const lastCandle = ohlcvResults[0]?.[ohlcvResults[0].length - 1];
+      const firstTimeframeOhlcv = ohlcvResults[0];
+      const lastCandle = firstTimeframeOhlcv?.[firstTimeframeOhlcv.length - 1];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       finalCurrentPrice = lastCandle?.close || (new DecimalConstructor(0) as DecimalValue);
     } else {

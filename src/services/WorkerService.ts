@@ -629,7 +629,7 @@ export class WorkerService {
         [pair],
       );
 
-      if (positionResult.rowCount === 0) {
+      if (!positionResult.rowCount || positionResult.rowCount === 0) {
         // Это может случиться, если SL сработал за мгновение до этого
         this.logger.warn(
           `[${pair}] Попытка закрыть позицию, которая уже не существует в БД. (Возможно, SL/TP сработал?)`,
@@ -706,6 +706,16 @@ export class WorkerService {
       const closeAmountDecimalForCalc = amountDecimal as any;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fullEntryFeeDecimal = fullEntryFeeCostDecimal as any;
+
+      // Проверка деления на ноль (защита от edge cases)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const zero = new DecimalConstructor(0);
+      if (fullAmountDecimalForFeeCalc.isZero() || fullAmountDecimalForFeeCalc.eq(zero)) {
+        throw new Error(
+          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Размер позиции равен нулю. Невозможно рассчитать пропорциональную комиссию.`,
+        );
+      }
+
       // Пропорциональная доля комиссии входа: (close_amount / full_amount) * entry_fee
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const proportionalEntryFeeResult = closeAmountDecimalForCalc
@@ -848,7 +858,7 @@ export class WorkerService {
         pair,
       ]);
 
-      if (positionResult.rowCount === 0) {
+      if (!positionResult.rowCount || positionResult.rowCount === 0) {
         this.logger.warn(`[${pair}] Попытка установить Limit Close для позиции, которая не существует в БД.`);
         throw new Error(`[${pair}] (ОШИБКА СИНХРОНИЗАЦИИ) Позиция для Limit Close не найдена в ActivePositions.`);
       }
@@ -941,7 +951,7 @@ export class WorkerService {
       [pair],
     );
 
-    if (positionCheckResult.rowCount === 0) {
+    if (!positionCheckResult.rowCount || positionCheckResult.rowCount === 0) {
       this.logger.warn(`[${pair}] Попытка MODIFY_POSITION для несуществующей позиции.`);
       throw new Error(`[${pair}] (ОШИБКА СИНХРОНИЗАЦИИ) Позиция для MODIFY не найдена в ActivePositions.`);
     }
@@ -953,15 +963,16 @@ export class WorkerService {
     let newTpOrder: IDecimalOrder | null = null;
     const ordersToCancel: string[] = [];
 
+    // Объявляем oldSlId вне блока if для использования в catch
+    const oldSlId = pos.current_tsl_sl_id || pos.current_sl_id;
+    let oldSlPriceForRollback: DecimalValue | null = null;
+    let oldSlAmountForRollback: DecimalValue | null = null;
+
     // --- Шаг 2: Обработка нового Stop Loss (если запрошен) ДО транзакции БД ---
     if (new_stop_loss_price !== null && new_stop_loss_price !== undefined) {
       this.logger.debug(`[${pair}] Модификация SL. Новая цена: ${new_stop_loss_price}`);
 
       // 2.1. Отмена старого SL на бирже (сохраняем данные для возможного rollback)
-      const oldSlId = pos.current_tsl_sl_id || pos.current_sl_id;
-      let oldSlPriceForRollback: DecimalValue | null = null;
-      let oldSlAmountForRollback: DecimalValue | null = null;
-
       if (oldSlId) {
         try {
           // ВАЖНО: Получаем данные старого SL из БД ПЕРЕД отменой (для rollback)
@@ -1096,7 +1107,7 @@ export class WorkerService {
           pair,
         ]);
 
-        if (queryResult.rowCount === 0) {
+        if (!queryResult.rowCount || queryResult.rowCount === 0) {
           throw new Error(`[${pair}] Позиция исчезла из БД во время MODIFY.`);
         }
 
@@ -1224,62 +1235,91 @@ export class WorkerService {
 
     this.logger.debug(`[${pair}] Запуск handleCancelOrders...`);
 
-    // Критично: Вся операция выполняется в ОДНОЙ транзакции
-    await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
-      if (orderIdToCancel) {
-        // --- Сценарий A: Отмена КОНКРЕТНОГО ордера ---
-        this.logger.debug(`[${pair}] Отмена конкретного ордера: ${orderIdToCancel}`);
+    // КРИТИЧНО: Отмена на бирже должна происходить ДО транзакции БД
+    // Если отмена провалится, БД операция не начнется
+    // Если отмена пройдет, а БД операция упадет - отмененные ордера будут "призраками" в БД
 
-        // Шаг 1: Отмена на Бирже
+    if (orderIdToCancel) {
+      // --- Сценарий A: Отмена КОНКРЕТНОГО ордера ---
+      this.logger.debug(`[${pair}] Отмена конкретного ордера: ${orderIdToCancel}`);
+
+      // Шаг 1: Отмена на Бирже (ДО транзакции БД)
+      try {
         await this.executionService.cancelOrderWithRetry(orderIdToCancel, pair);
+        this.logger.debug(`[${pair}] Ордер ${orderIdToCancel} успешно отменен на бирже.`);
+      } catch (error) {
+        // Если отмена на бирже провалилась, не обновляем БД (ордер может быть уже исполнен)
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `[${pair}] Не удалось отменить ордер ${orderIdToCancel} на бирже (возможно, уже исполнен): ${errorMessage}`,
+        );
+        // Продолжаем: возможно ордер уже исполнен или не существует, все равно удалим из БД
+      }
 
-        // Шаг 2: Атомарная очистка БД
-
+      // Шаг 2: Атомарная очистка БД (даже если отмена на бирже провалилась - удаляем "призрак")
+      await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
         // 2.1. Удаляем из ActiveOrders
         await client.query(`DELETE FROM ActiveOrders WHERE exchange_order_id = $1`, [orderIdToCancel]);
 
         // 2.2. (Критично) Удаляем связанный TSL, если он был
         // Если мы отменили SL, TSL больше недействителен
         await client.query(`DELETE FROM TSL_State WHERE current_stop_order_id = $1`, [orderIdToCancel]);
-      } else {
-        // --- Сценарий Б: Отмена ВСЕХ ордеров по паре ---
-        this.logger.debug(`[${pair}] Отмена ВСЕХ ордеров...`);
+      });
 
-        // Шаг 1: Получить ВСЕ ID ордеров из БД
-        // Мы должны сделать это *до* отмены, чтобы получить полный список
-        const ordersResult = await client.query(
-          `SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1 FOR UPDATE`,
-          [pair],
-        );
-        const orderIdsToCancel: string[] = ordersResult.rows.map((r) => r.exchange_order_id as string);
+      this.logger.info(`[${pair}] Атомарная транзакция (CANCEL Orders) УСПЕШНА.`);
+    } else {
+      // --- Сценарий Б: Отмена ВСЕХ ордеров по паре ---
+      this.logger.debug(`[${pair}] Отмена ВСЕХ ордеров...`);
 
-        if (orderIdsToCancel.length === 0) {
-          this.logger.warn(`[${pair}] Нет ордеров для отмены.`);
-          return;
+      // Шаг 1: Получить ВСЕ ID ордеров из БД (перед отменой на бирже)
+      const ordersResult = await this.databaseService.query(
+        `SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1`,
+        [pair],
+      );
+      const orderIdsToCancel: string[] = ordersResult.rows.map((r) => r.exchange_order_id as string);
+
+      if (orderIdsToCancel.length === 0) {
+        this.logger.warn(`[${pair}] Нет ордеров для отмены.`);
+        return;
+      }
+
+      // Шаг 2: Отмена ВСЕХ ордеров на Бирже (ДО транзакции БД)
+      const successfullyCancelledIds: string[] = [];
+      const failedToCancelIds: string[] = [];
+
+      for (const orderId of orderIdsToCancel) {
+        try {
+          await this.executionService.cancelOrderWithRetry(orderId, pair);
+          successfullyCancelledIds.push(orderId);
+          this.logger.debug(`[${pair}] Ордер ${orderId} успешно отменен на бирже.`);
+        } catch (error) {
+          // Логируем ошибку, но продолжаем отмену остальных ордеров
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`[${pair}] Не удалось отменить ордер ${orderId} на бирже: ${errorMessage}`);
+          failedToCancelIds.push(orderId);
         }
+      }
 
-        // Шаг 2: Отмена ВСЕХ ордеров на Бирже
-        for (const orderId of orderIdsToCancel) {
-          // Отменяем по одному, используя Guaranteed service
-          try {
-            await this.executionService.cancelOrderWithRetry(orderId, pair);
-          } catch (error) {
-            // Логируем ошибку, но продолжаем отмену остальных ордеров
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            this.logger.warn(`[${pair}] Не удалось отменить ордер ${orderId}: ${errorMessage}`);
-          }
-        }
-
-        // Шаг 3: Атомарная очистка БД
-
-        // 3.1. Удаляем ВСЕ ордера по паре
+      // Шаг 3: Атомарная очистка БД (удаляем все ордера, включая те, что не удалось отменить на бирже)
+      // Если ордер не был отменен на бирже (ошибка), но был удален из БД - SyncEngine восстановит состояние
+      await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+        // 3.1. Удаляем ВСЕ ордера по паре (и успешно отмененные, и неотмененные - они могут быть "призраками")
         await client.query(`DELETE FROM ActiveOrders WHERE pair = $1`, [pair]);
 
         // 3.2. Удаляем ВСЕ TSL по паре
         await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
+      });
+
+      // Логируем результаты
+      if (failedToCancelIds.length > 0) {
+        this.logger.warn(
+          `[${pair}] Часть ордеров не была отменена на бирже (${failedToCancelIds.length} из ${orderIdsToCancel.length}), но удалены из БД. SyncEngine восстановит состояние при следующей сверке.`,
+        );
       }
 
-      this.logger.info(`[${pair}] Атомарная транзакция (CANCEL Orders) УСПЕШНА.`);
-    });
+      this.logger.info(
+        `[${pair}] Атомарная транзакция (CANCEL Orders) УСПЕШНА. Успешно отменено: ${successfullyCancelledIds.length}, не удалось: ${failedToCancelIds.length}.`,
+      );
+    }
   }
 }

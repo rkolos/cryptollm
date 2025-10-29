@@ -166,7 +166,12 @@ export class MockExchangeService implements IExchangeService {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  public async fetchOHLCV(symbol: string, timeframe: string, _since?: number, _limit?: number): Promise<IDecimalOHLCV[]> {
+  public async fetchOHLCV(
+    symbol: string,
+    timeframe: string,
+    _since?: number,
+    _limit?: number,
+  ): Promise<IDecimalOHLCV[]> {
     this.logger.debug(`Mock fetchOHLCV: ${symbol}, ${timeframe}`);
     const currentPrice = this.currentPrices.get(symbol) || (new DecimalConstructor(30000) as DecimalType);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

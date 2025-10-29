@@ -192,7 +192,18 @@ export class SlowCycleService {
             continue;
           }
 
-          const conditions = JSON.parse(triggerConditionsJson) as LLMTriggerCondition[];
+          let conditions: LLMTriggerCondition[];
+          try {
+            conditions = JSON.parse(triggerConditionsJson) as LLMTriggerCondition[];
+          } catch (parseError) {
+            this.logger.error(`(SlowCycle) [${pair}] Ошибка парсинга trigger_conditions_json:`, parseError);
+            continue; // Пропускаем эту пару при ошибке парсинга
+          }
+
+          if (!Array.isArray(conditions)) {
+            this.logger.warn(`(SlowCycle) [${pair}] trigger_conditions_json не является массивом. Пропускаем.`);
+            continue;
+          }
 
           for (const condition of conditions) {
             let triggerHit = false;

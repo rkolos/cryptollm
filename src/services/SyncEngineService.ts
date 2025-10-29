@@ -524,12 +524,12 @@ export class SyncEngineService {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const costDecimal = trade.cost as any;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const feeCostDecimal = trade.fee.cost as any;
+          const feeCostDecimal = (trade.fee?.cost as any) || new DecimalConstructor(0);
 
           realAmount = realAmount.plus(new DecimalConstructor(amountDecimal.toString()));
           realCost = realCost.plus(new DecimalConstructor(costDecimal.toString()));
           realFeeCost = realFeeCost.plus(new DecimalConstructor(feeCostDecimal.toString()));
-          if (trade.fee.currency) {
+          if (trade.fee?.currency) {
             feeCurrency = trade.fee.currency;
           }
         }

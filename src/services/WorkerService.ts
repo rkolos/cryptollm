@@ -174,11 +174,21 @@ export class WorkerService {
       // Обновляем лог в БД
       await this._updateDecisionLog(llm_decision_log_id, 'accepted', null, null);
 
-      // Отправляем уведомление
-      this.notificationService.sendAlert(
-        `[${pair}] ИСПОЛНЕНО: ${decision.action} (Justification: ${decision.justification})`,
-        true, // Включить AccountState
-      );
+      // Отправляем уведомление со сводной информацией о торговле для действий OPEN/CLOSE
+      // (т.е. для действий, которые изменяют позиции)
+      if (decision.action === 'OPEN_LONG' || decision.action === 'OPEN_SHORT' || decision.action === 'CLOSE_POSITION') {
+        this.notificationService.sendTradingSummary(
+          decision.action,
+          pair,
+          decision.justification || 'Обоснование не предоставлено',
+        );
+      } else {
+        // Для других действий отправляем обычное уведомление с обоснованием
+        this.notificationService.sendAlert(
+          `[${pair}] ИСПОЛНЕНО: ${decision.action}\n\n🤖 Обоснование LLM:\n${decision.justification || 'Обоснование не предоставлено'}`,
+          true, // Включить AccountState
+        );
+      }
     } catch (executionError) {
       // Провал Исполнения
       const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);

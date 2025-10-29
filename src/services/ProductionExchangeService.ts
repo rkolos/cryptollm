@@ -175,14 +175,14 @@ export class ProductionExchangeService implements IExchangeService {
 
       const order = await this.ccxtExchange.createOrder(orderParams);
       return {
-        id: order.id,
-        clientOrderId: order.clientOrderId,
-        symbol: order.symbol,
-        type: order.type,
+        id: String(order.id),
+        clientOrderId: order.clientOrderId ? String(order.clientOrderId) : undefined,
+        symbol: String(order.symbol),
+        type: String(order.type),
         side: order.side as 'buy' | 'sell',
         amount: this.toDecimal(order.amount),
         price: order.price ? this.toDecimal(order.price) : undefined,
-        status: order.status,
+        status: String(order.status),
         filled: order.filled ? this.toDecimal(order.filled) : undefined,
         remaining: order.remaining ? this.toDecimal(order.remaining) : undefined,
         cost: order.cost ? this.toDecimal(order.cost) : undefined,
@@ -193,7 +193,7 @@ export class ProductionExchangeService implements IExchangeService {
 
   public async cancelOrder(orderId: string, symbol: string): Promise<void> {
     await this.execute(async () => {
-      await this.ccxtExchange.cancelOrder(orderId, symbol);
+      await this.ccxtExchange.cancelOrder(orderId, symbol, {});
     });
   }
 
@@ -201,14 +201,14 @@ export class ProductionExchangeService implements IExchangeService {
     return await this.execute(async () => {
       const order = await this.ccxtExchange.fetchOrder(orderId, symbol);
       return {
-        id: order.id,
-        clientOrderId: order.clientOrderId,
-        symbol: order.symbol,
-        type: order.type,
+        id: String(order.id),
+        clientOrderId: order.clientOrderId ? String(order.clientOrderId) : undefined,
+        symbol: String(order.symbol),
+        type: String(order.type),
         side: order.side as 'buy' | 'sell',
         amount: this.toDecimal(order.amount),
         price: order.price ? this.toDecimal(order.price) : undefined,
-        status: order.status,
+        status: String(order.status),
         filled: order.filled ? this.toDecimal(order.filled) : undefined,
         remaining: order.remaining ? this.toDecimal(order.remaining) : undefined,
         cost: order.cost ? this.toDecimal(order.cost) : undefined,
@@ -221,14 +221,14 @@ export class ProductionExchangeService implements IExchangeService {
     return await this.execute(async () => {
       const orders = await this.ccxtExchange.fetchOpenOrders(symbol);
       return orders.map((order) => ({
-        id: order.id,
-        clientOrderId: order.clientOrderId,
-        symbol: order.symbol,
-        type: order.type,
+        id: String(order.id),
+        clientOrderId: order.clientOrderId ? String(order.clientOrderId) : undefined,
+        symbol: String(order.symbol),
+        type: String(order.type),
         side: order.side as 'buy' | 'sell',
         amount: this.toDecimal(order.amount),
         price: order.price ? this.toDecimal(order.price) : undefined,
-        status: order.status,
+        status: String(order.status),
         filled: order.filled ? this.toDecimal(order.filled) : undefined,
         remaining: order.remaining ? this.toDecimal(order.remaining) : undefined,
         cost: order.cost ? this.toDecimal(order.cost) : undefined,

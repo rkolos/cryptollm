@@ -1,6 +1,6 @@
 import Decimal from 'decimal.js';
 
-type DecimalType = InstanceType<typeof Decimal>;
+type DecimalType = Decimal;
 
 export interface IDecimalOHLCV {
   timestamp: number;

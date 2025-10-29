@@ -478,6 +478,17 @@ export class ValidatorService {
         sanityResult.entryPrice,
       );
 
+      // Уровень 4 (Часть 2): Exchange and Balance Rules
+      this._validateExchangeAndBalanceRules(
+        decision.pair,
+        rounded.roundedAmountUsd,
+        calculatedAmounts.usdAtRisk,
+        accountState,
+      );
+
+      this.logger.info(`[${decision.pair}] Валидация Уровня 4 (Balance, MinNotional) пройдена.`);
+      this.logger.info(`[${decision.pair}] ВАЛИДАЦИЯ УСПЕШНА. Ордер готов к исполнению.`);
+
       return {
         ...sanityResult,
         ...calculatedAmounts,

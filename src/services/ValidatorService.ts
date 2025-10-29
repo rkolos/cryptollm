@@ -8,6 +8,7 @@ import type {
   MarketData,
   StrategyContext,
   SanityCheckResult,
+  CalculatedAmounts,
   DecimalValue,
 } from '../interfaces/IValidatorTypes.js';
 import type { IMarketRules } from '../interfaces/IMarketRules.js';
@@ -226,13 +227,83 @@ export class ValidatorService {
     };
   }
 
+  private _calculatePositionSizing(
+    decision: LLMDecision,
+    accountState: AccountState,
+    strategyContext: StrategyContext,
+    entryPrice: DecimalValue,
+  ): CalculatedAmounts {
+    const riskRules = strategyContext.risk_rules;
+
+    // Определение % риска
+    let riskPercentToUse: DecimalValue;
+    if (decision.parameters.risk_percent !== null && decision.parameters.risk_percent !== undefined) {
+      riskPercentToUse = this.toDecimal(decision.parameters.risk_percent);
+    } else {
+      riskPercentToUse = this.toDecimal(riskRules.default_risk_per_trade_percent);
+    }
+
+    // Проверка лимита риска
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const riskPercentDecimal = riskPercentToUse as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const maxAllowedDecimal = this.toDecimal(riskRules.max_allowed_risk_per_trade_percent) as any;
+    if (riskPercentDecimal.gt(maxAllowedDecimal)) {
+      throw new ValidationError(`Risk percent ${riskPercentDecimal} exceeds max allowed ${maxAllowedDecimal}`);
+    }
+
+    // Расчет USD@Risk
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const totalValueDecimal = accountState.total_portfolio_value_usdt as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const hundred = new DecimalConstructor(100);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const usdAtRisk = totalValueDecimal.mul(riskPercentDecimal).div(hundred) as DecimalValue;
+
+    // Дистанция до стопа
+    const stopPrice = this.toDecimal(decision.parameters.stop_loss_price);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stopPriceDecimal = stopPrice as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entryPriceDecimal = entryPrice as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const distanceToStop = entryPriceDecimal.sub(stopPriceDecimal).abs() as DecimalValue;
+
+    // Проверка нулевой дистанции
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const distanceDecimal = distanceToStop as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const zero = new DecimalConstructor(0);
+    if (distanceDecimal.isZero() || distanceDecimal.eq(zero)) {
+      throw new ValidationError('Entry price and Stop Loss price are identical');
+    }
+
+    // Расчет "сырого" количества монеты
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const usdAtRiskDecimal = usdAtRisk as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawAmountCoin = usdAtRiskDecimal.div(distanceDecimal) as DecimalValue;
+
+    // Расчет "сырой" стоимости
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawAmountCoinDecimal = rawAmountCoin as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawAmountUsd = rawAmountCoinDecimal.mul(entryPriceDecimal) as DecimalValue;
+
+    return {
+      rawAmountCoin,
+      rawAmountUsd,
+      usdAtRisk,
+    };
+  }
+
   public validateDecision(
     decision: LLMDecision,
     accountState: AccountState,
     strategyContext: StrategyContext,
     marketData: MarketData,
     exchangeRules: IMarketRules,
-  ): SanityCheckResult {
+  ): SanityCheckResult & Partial<CalculatedAmounts> {
     this.logger.debug(`Validating decision: ${decision.action} for ${decision.pair}`);
 
     // Проверка наличия позиции для CLOSE_POSITION
@@ -244,6 +315,28 @@ export class ValidatorService {
     }
 
     // Уровень 1: Sanity and Logic Checks
-    return this._validateSanityAndLogicChecks(decision, marketData);
+    const sanityResult = this._validateSanityAndLogicChecks(decision, marketData);
+
+    // Уровень 2: Position Sizing (только для OPEN_LONG и OPEN_SHORT)
+    if (decision.action === 'OPEN_LONG' || decision.action === 'OPEN_SHORT') {
+      const calculatedAmounts = this._calculatePositionSizing(
+        decision,
+        accountState,
+        strategyContext,
+        sanityResult.entryPrice,
+      );
+      return {
+        ...sanityResult,
+        ...calculatedAmounts,
+      };
+    }
+
+    // Для других действий возвращаем только результат Уровня 1
+    return {
+      ...sanityResult,
+      rawAmountCoin: this.toDecimal(0),
+      rawAmountUsd: this.toDecimal(0),
+      usdAtRisk: this.toDecimal(0),
+    };
   }
 }

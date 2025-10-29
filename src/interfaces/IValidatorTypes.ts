@@ -38,3 +38,9 @@ export interface StrategyContext {
 export interface SanityCheckResult {
   entryPrice: DecimalValue;
 }
+
+export interface CalculatedAmounts {
+  rawAmountCoin: DecimalValue;
+  rawAmountUsd: DecimalValue;
+  usdAtRisk: DecimalValue;
+}

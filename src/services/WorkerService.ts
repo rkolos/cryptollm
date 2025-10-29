@@ -459,16 +459,75 @@ export class WorkerService {
   }
 
   /**
-   * Заглушка для OPEN (Limit) - Задача 7.2.1
+   * Реализация OPEN (Limit) - Задача 7.2.1
+   * Отложенное открытие позиции через limit ордер
    */
-  private async _handleOpenLimitPosition(
-    decision: LLMDecision,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _validationResult: CalculatedAmounts,
-  ): Promise<void> {
-    this.logger.debug(`[${decision.pair}] (STUB) Вызов _handleOpenLimitPosition...`);
-    // Логика Задачи 7.2.1 будет здесь
-    throw new Error(`[${decision.pair}] OPEN (Limit) еще не реализовано. См. Задачу 7.2.1`);
+  private async _handleOpenLimitPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
+    const { pair, parameters, action } = decision;
+    const { price, stop_loss_price, take_profit_price, trailing_stop_config } = parameters;
+    const { roundedAmountCoin } = validationResult;
+
+    const side: 'buy' | 'sell' = action === 'OPEN_LONG' ? 'buy' : 'sell';
+
+    this.logger.debug(
+      `[${pair}] Запуск _handleOpenLimitPosition. Side: ${side}, Amount: ${roundedAmountCoin.toString()}, Price: ${price}`,
+    );
+
+    // Проверка наличия цены для limit ордера
+    if (!price) {
+      throw new Error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Для limit ордера требуется параметр price.`);
+    }
+
+    // Критично: Вся операция выполняется в ОДНОЙ транзакции
+    await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+      // --- Шаг 1: Создание Limit ордера ---
+      // НЕ ЖДАТЬ ИСПОЛНЕНИЯ - ордер остается открытым
+      const limitPriceDecimal = new DecimalConstructor(price.toString());
+      const amountDecimal = new DecimalConstructor(roundedAmountCoin.toString());
+
+      const limitOrder = await this.executionService.createOrderWithRetry(
+        pair,
+        'limit',
+        side,
+        amountDecimal,
+        limitPriceDecimal,
+      );
+
+      this.logger.debug(`[${pair}] Limit ордер ${limitOrder.id} создан (status: ${limitOrder.status || 'open'}).`);
+
+      // --- Шаг 2: Сохранение Limit ордера в БД (Атомарно) ---
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const orderAny = limitOrder as any;
+      const orderPrice = orderAny.price || limitPriceDecimal;
+      const orderPriceDecimal = new DecimalConstructor(orderPrice.toString());
+
+      // Подготовка JSON для trailing_stop_config
+      const tslConfigJson = trailing_stop_config ? JSON.stringify(trailing_stop_config) : null;
+
+      // Сохраняем limit_open ордер с target полями
+      await client.query(
+        `INSERT INTO ActiveOrders (
+          exchange_order_id, pair, status, type, side, price, amount,
+          target_stop_loss_price, target_take_profit_price, target_trailing_stop_json
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          limitOrder.id,
+          pair,
+          limitOrder.status || 'open',
+          'limit_open',
+          side,
+          orderPriceDecimal.toNumber(),
+          amountDecimal.toNumber(),
+          stop_loss_price !== null && stop_loss_price !== undefined ? stop_loss_price : null,
+          take_profit_price !== null && take_profit_price !== undefined ? take_profit_price : null,
+          tslConfigJson,
+        ],
+      );
+
+      this.logger.info(
+        `[${pair}] Атомарная транзакция (OPEN Limit) УСПЕШНА. Ордер ${limitOrder.id} сохранен с target полями.`,
+      );
+    });
   }
 
   private async handleClosePosition(

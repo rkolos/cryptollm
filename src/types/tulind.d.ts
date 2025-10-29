@@ -1,10 +1,6 @@
 declare module 'tulind' {
   export interface IndicatorFunction {
-    (
-      data: number[][],
-      options: number[],
-      callback: (err: Error | null, result: number[][]) => void,
-    ): void;
+    (data: number[][], options: number[], callback: (err: Error | null, result: number[][]) => void): void;
   }
 
   export interface Indicators {
@@ -22,4 +18,3 @@ declare module 'tulind' {
 
   export const indicators: Indicators;
 }
-

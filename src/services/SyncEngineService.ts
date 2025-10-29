@@ -381,25 +381,53 @@ export class SyncEngineService {
     let totalCost = new DecimalConstructor(0);
     let totalFeeCost = new DecimalConstructor(0);
 
+    // Определяем тип позиции по первой сделке
+    const firstTrade = historyTrades[0];
+    if (!firstTrade) {
+      return null;
+    }
+    const isLongPosition = firstTrade.side === 'buy';
+
     for (const trade of historyTrades) {
       const amount = new DecimalConstructor(trade.amount);
       const price = new DecimalConstructor(trade.price);
       const feeCost = new DecimalConstructor(trade.fee_cost);
 
-      if (trade.side === 'buy') {
-        totalAmount = totalAmount.plus(amount);
-        totalCost = totalCost.plus(amount.mul(price));
+      if (isLongPosition) {
+        // Для LONG позиций:
+        // buy - открытие/увеличение позиции, добавляем amount и cost
+        // sell - закрытие/уменьшение позиции, вычитаем amount и cost
+        if (trade.side === 'buy') {
+          totalAmount = totalAmount.plus(amount);
+          totalCost = totalCost.plus(amount.mul(price));
+        } else {
+          // sell - уменьшаем позицию
+          totalAmount = totalAmount.minus(amount);
+          totalCost = totalCost.minus(amount.mul(price));
+        }
       } else {
-        // sell - уменьшаем позицию
-        totalAmount = totalAmount.minus(amount);
-        totalCost = totalCost.minus(amount.mul(price));
+        // Для SHORT позиций:
+        // sell - открытие/увеличение позиции (totalAmount становится отрицательным), добавляем cost
+        // buy - закрытие/уменьшение позиции (totalAmount становится менее отрицательным), вычитаем cost
+        if (trade.side === 'sell') {
+          totalAmount = totalAmount.minus(amount); // SHORT: отрицательное значение
+          totalCost = totalCost.plus(amount.mul(price)); // Добавляем cost при открытии SHORT
+        } else {
+          // buy - закрытие SHORT, уменьшаем отрицательное totalAmount
+          totalAmount = totalAmount.plus(amount);
+          totalCost = totalCost.minus(amount.mul(price)); // Вычитаем cost при закрытии SHORT
+        }
       }
 
       totalFeeCost = totalFeeCost.plus(feeCost);
     }
 
-    // Если позиция закрыта (totalAmount <= 0), возвращаем null
-    if (totalAmount.lessThanOrEqualTo(0)) {
+    // Если позиция закрыта (totalAmount = 0 или противоположного знака), возвращаем null
+    if (
+      totalAmount.isZero() ||
+      (isLongPosition && totalAmount.lessThanOrEqualTo(0)) ||
+      (!isLongPosition && totalAmount.greaterThanOrEqualTo(0))
+    ) {
       return null;
     }
 
@@ -407,6 +435,8 @@ export class SyncEngineService {
     const side: 'long' | 'short' = totalAmount.greaterThan(0) ? 'long' : 'short';
 
     // Рассчитываем среднюю цену входа
+    // Для LONG: totalCost положительный, делим на положительный totalAmount
+    // Для SHORT: totalCost положительный (накоплен при открытии), делим на абсолютное значение отрицательного totalAmount
     const averageEntryPrice = totalCost.abs().div(totalAmount.abs());
 
     return {
@@ -613,24 +643,27 @@ export class SyncEngineService {
               );
             }
 
-            // 3.5. Вставляем сделку в TradeHistory
-            // Используем последнюю сделку как основную для истории
-            const lastTrade = orderTrades[orderTrades.length - 1];
-            if (lastTrade) {
+            // 3.5. Вставляем все сделки в TradeHistory (не только последнюю)
+            // Это важно для правильного расчета средней цены и учета частичного исполнения
+            for (const trade of orderTrades) {
+              const { randomUUID } = await import('crypto');
+              const uniqueSuffix = randomUUID().substring(0, 8);
+              const exchangeTradeId = `${trade.id}-${trade.timestamp}-${uniqueSuffix}`;
+
               await client.query(
                 `INSERT INTO TradeHistory (timestamp, exchange_trade_id, exchange_order_id, pair, side, price, amount, fee_cost, fee_currency, realized_pnl_usd)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  ON CONFLICT (exchange_trade_id) DO NOTHING`,
                 [
-                  new Date(lastTrade.timestamp),
-                  lastTrade.id,
+                  new Date(trade.timestamp),
+                  exchangeTradeId,
                   dbOrder.exchange_order_id,
                   pair,
-                  dbOrder.side,
-                  realEntryPrice.toString(),
-                  realAmount.toString(),
-                  realFeeCost.toString(),
-                  feeCurrency,
+                  trade.side || dbOrder.side, // Используем side из сделки, если доступен
+                  trade.price.toString(),
+                  trade.amount.toString(),
+                  trade.fee?.cost?.toString() || '0',
+                  trade.fee?.currency || feeCurrency,
                   null, // realized_pnl_usd будет рассчитан позже
                 ],
               );

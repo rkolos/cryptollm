@@ -384,8 +384,10 @@ export class WorkerService {
           );
 
           // 2. Сохранить Историю (вход)
-          // Для exchange_trade_id используем order.id + timestamp для уникальности
-          const exchangeTradeId = `${marketOrder.id}-${realTimestamp}`;
+          // Для exchange_trade_id используем order.id + timestamp + UUID для гарантированной уникальности
+          const { randomUUID } = await import('crypto');
+          const uniqueSuffix = randomUUID().substring(0, 8);
+          const exchangeTradeId = `${marketOrder.id}-${realTimestamp}-${uniqueSuffix}`;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const feeCurrency = (orderAny.fee?.currency as string) || 'USDT';
 
@@ -468,7 +470,7 @@ export class WorkerService {
                 pair,
                 slPriceDecimal.toNumber(),
                 slOrder.id,
-                entryPriceDecimal.toNumber(), // Начальная "пиковая" цена = цена входа
+                entryPriceDecimal.toNumber(), // Начальная price_seen = цена входа (для LONG будет обновляться вверх, для SHORT вниз)
                 tslConfigJson,
               ],
             );
@@ -613,7 +615,8 @@ export class WorkerService {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _validationResult: CalculatedAmounts,
   ): Promise<void> {
-    const { pair } = decision;
+    const { pair, parameters } = decision;
+    const { amount_percent } = parameters;
 
     this.logger.debug(`[${pair}] Запуск _handleCloseMarketPosition.`);
 
@@ -635,14 +638,25 @@ export class WorkerService {
       }
 
       const currentPosition = positionResult.rows[0];
-      const positionAmountDecimal = new DecimalConstructor(currentPosition.amount.toString());
+      const fullPositionAmountDecimal = new DecimalConstructor(currentPosition.amount.toString());
       const positionSide = currentPosition.side as 'long' | 'short';
+
+      // --- Шаг 1.5: Расчет объема для закрытия на основе amount_percent ---
+      const amountPercentDecimal = new DecimalConstructor(amount_percent!.toString());
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fullAmountDecimal = fullPositionAmountDecimal as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const percentDecimal = amountPercentDecimal as any;
+      const hundred = new DecimalConstructor(100);
+      // Рассчитываем объем для закрытия: position_amount * amount_percent / 100
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const closeAmountDecimal = fullAmountDecimal.mul(percentDecimal).div(hundred) as any as DecimalValue;
 
       // Определяем ордер на закрытие
       const closeSide: 'buy' | 'sell' = positionSide === 'long' ? 'sell' : 'buy';
 
       this.logger.debug(
-        `[${pair}] Закрытие ${positionSide} позиции. Объем: ${positionAmountDecimal.toString()}, Сторона ордера: ${closeSide}.`,
+        `[${pair}] Закрытие ${positionSide} позиции. Объем позиции: ${fullPositionAmountDecimal.toString()}, Закрывается: ${closeAmountDecimal.toString()} (${amount_percent}%), Сторона ордера: ${closeSide}.`,
       );
 
       // --- Шаг 2: (Архитектура 7.3) - НЕ отменять ордера ---
@@ -655,7 +669,7 @@ export class WorkerService {
         pair,
         'market',
         closeSide,
-        positionAmountDecimal,
+        closeAmountDecimal,
       );
 
       // Извлекаем РЕАЛЬНЫЕ данные исполнения
@@ -681,17 +695,28 @@ export class WorkerService {
       const amountDecimal = new DecimalConstructor(realAmount.toString());
       const closeFeeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
 
-      // --- Расчет Realized PnL ---
+      // --- Расчет Realized PnL (с учетом частичного закрытия) ---
       const entryPriceDecimal = new DecimalConstructor(currentPosition.average_entry_price.toString());
-      const entryFeeCostDecimal = new DecimalConstructor(currentPosition.total_fee_cost?.toString() || '0');
+      const fullEntryFeeCostDecimal = new DecimalConstructor(currentPosition.total_fee_cost?.toString() || '0');
+
+      // Для частичного закрытия: пропорционально распределяем комиссию входа
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const entryFeeDecimal = entryFeeCostDecimal as any;
+      const fullAmountDecimalForFeeCalc = fullPositionAmountDecimal as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const closeAmountDecimalForCalc = amountDecimal as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fullEntryFeeDecimal = fullEntryFeeCostDecimal as any;
+      // Пропорциональная доля комиссии входа: (close_amount / full_amount) * entry_fee
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const proportionalEntryFee = closeAmountDecimalForCalc
+        .div(fullAmountDecimalForFeeCalc)
+        .mul(fullEntryFeeDecimal) as any;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const closeFeeDecimal = closeFeeCostDecimal as any;
 
       let realizedPnlUsd: DecimalValue;
       if (positionSide === 'long') {
-        // Для LONG: PnL = (close_price - entry_price) * amount - entry_fee - close_fee
+        // Для LONG: PnL = (close_price - entry_price) * amount - proportional_entry_fee - close_fee
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const priceDiffDecimal = (closePriceDecimal as any).minus(entryPriceDecimal);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -699,11 +724,11 @@ export class WorkerService {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const grossPnl = priceDiffDecimal.mul(amountDecimalForCalc);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const totalFees = (entryFeeDecimal as any).plus(closeFeeDecimal);
+        const totalFees = proportionalEntryFee.plus(closeFeeDecimal);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         realizedPnlUsd = grossPnl.minus(totalFees) as DecimalValue;
       } else {
-        // Для SHORT: PnL = (entry_price - close_price) * amount - entry_fee - close_fee
+        // Для SHORT: PnL = (entry_price - close_price) * amount - proportional_entry_fee - close_fee
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const priceDiffDecimal = (entryPriceDecimal as any).minus(closePriceDecimal);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -711,7 +736,7 @@ export class WorkerService {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const grossPnl = priceDiffDecimal.mul(amountDecimalForCalc);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const totalFees = (entryFeeDecimal as any).plus(closeFeeDecimal);
+        const totalFees = proportionalEntryFee.plus(closeFeeDecimal);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         realizedPnlUsd = grossPnl.minus(totalFees) as DecimalValue;
       }
@@ -723,20 +748,53 @@ export class WorkerService {
         `[${pair}] Realized PnL: ${realizedPnlDecimal.toFixed(2)} USDT (Entry: ${entryPriceDecimal.toString()}, Close: ${closePriceDecimal.toString()}, Amount: ${amountDecimal.toString()})`,
       );
 
-      // --- Шаг 4: Атомарная Очистка БД ---
+      // --- Шаг 4: Определяем, полное или частичное закрытие ---
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const amountDecimalForCheck = amountDecimal as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const isFullClose = amountDecimalForCheck.gte(fullAmountDecimalForFeeCalc) || amountPercentDecimal.gte(hundred);
 
-      // 1. Удалить Позицию
-      await client.query(`DELETE FROM ActivePositions WHERE pair = $1`, [pair]);
+      // --- Шаг 5: Атомарное обновление БД ---
+      if (isFullClose) {
+        // Полное закрытие: удаляем позицию и все связанные данные
+        // 1. Удалить Позицию
+        await client.query(`DELETE FROM ActivePositions WHERE pair = $1`, [pair]);
 
-      // 2. Удалить ВСЕ связанные ордера (SL, TP, Limit)
-      await client.query(`DELETE FROM ActiveOrders WHERE pair = $1`, [pair]);
+        // 2. Удалить ВСЕ связанные ордера (SL, TP, Limit)
+        await client.query(`DELETE FROM ActiveOrders WHERE pair = $1`, [pair]);
 
-      // 3. Удалить ВСЕ связанные TSL
-      await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
+        // 3. Удалить ВСЕ связанные TSL
+        await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
+      } else {
+        // Частичное закрытие: обновляем позицию и пропорционально распределяем комиссии
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const remainingAmount = fullAmountDecimalForFeeCalc.minus(amountDecimalForCheck) as any as DecimalValue;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const remainingEntryFee = fullEntryFeeDecimal.minus(proportionalEntryFee) as any as DecimalValue;
+
+        // 1. Обновить Позицию (уменьшаем amount и fee_cost)
+        await client.query(`UPDATE ActivePositions SET amount = $1, total_fee_cost = $2 WHERE pair = $3`, [
+          remainingAmount.toString(),
+          remainingEntryFee.toString(),
+          pair,
+        ]);
+
+        // 2. Обновить размеры связанных ордеров (SL, TP) пропорционально
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const remainingAmountDecimal = remainingAmount as any;
+        await client.query(
+          `UPDATE ActiveOrders SET amount = $1 WHERE pair = $2 AND type IN ('stop_loss_limit', 'take_profit_limit')`,
+          [remainingAmountDecimal.toString(), pair],
+        );
+
+        // 3. TSL остается активным (price_seen обновляется автоматически при тиках)
+      }
 
       // 4. Сохранить Историю (выход) с calculated PnL
-      // Для exchange_trade_id используем order.id + timestamp для уникальности
-      const exchangeTradeId = `${closeMarketOrder.id}-${realTimestamp}`;
+      // Для exchange_trade_id используем order.id + timestamp + случайный UUID для гарантированной уникальности
+      const { randomUUID } = await import('crypto');
+      const uniqueSuffix = randomUUID().substring(0, 8);
+      const exchangeTradeId = `${closeMarketOrder.id}-${realTimestamp}-${uniqueSuffix}`;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const feeCurrency = (orderAny.fee?.currency as string) || 'USDT';
 
@@ -897,10 +955,28 @@ export class WorkerService {
     if (new_stop_loss_price !== null && new_stop_loss_price !== undefined) {
       this.logger.debug(`[${pair}] Модификация SL. Новая цена: ${new_stop_loss_price}`);
 
-      // 2.1. Отмена старого SL на бирже
+      // 2.1. Отмена старого SL на бирже (сохраняем данные для возможного rollback)
       const oldSlId = pos.current_tsl_sl_id || pos.current_sl_id;
+      let oldSlPriceForRollback: DecimalValue | null = null;
+      let oldSlAmountForRollback: DecimalValue | null = null;
+
       if (oldSlId) {
         try {
+          // ВАЖНО: Получаем данные старого SL из БД ПЕРЕД отменой (для rollback)
+          const oldSlOrderResult = await this.databaseService.query(
+            `SELECT price, amount FROM ActiveOrders WHERE exchange_order_id = $1`,
+            [oldSlId],
+          );
+
+          if (oldSlOrderResult.rowCount && oldSlOrderResult.rowCount > 0) {
+            const oldSlData = oldSlOrderResult.rows[0];
+            oldSlPriceForRollback = new DecimalConstructor(oldSlData.price.toString());
+            oldSlAmountForRollback = new DecimalConstructor(oldSlData.amount.toString());
+            this.logger.debug(
+              `[${pair}] Сохранены параметры старого SL для rollback: price=${oldSlPriceForRollback.toString()}, amount=${oldSlAmountForRollback.toString()}`,
+            );
+          }
+
           await this.executionService.cancelOrderWithRetry(oldSlId, pair);
           ordersToCancel.push(oldSlId);
           this.logger.debug(`[${pair}] Старый SL ордер ${oldSlId} отменен на бирже.`);
@@ -925,7 +1001,46 @@ export class WorkerService {
         );
         this.logger.debug(`[${pair}] Новый SL ордер ${newSlOrder.id} создан на бирже.`);
       } catch (createError) {
-        this.logger.error(`[${pair}] Не удалось создать новый SL ордер:`, createError);
+        // КРИТИЧЕСКИЙ СБОЙ: новый SL не создан, но старый уже отменен
+        // Попытка восстановить старый SL (rollback)
+        this.logger.error(
+          `[${pair}] Не удалось создать новый SL ордер. Попытка восстановить старый SL...`,
+          createError,
+        );
+
+        if (oldSlId && oldSlPriceForRollback && oldSlAmountForRollback) {
+          try {
+            const oldSlPriceParams = { stopPrice: oldSlPriceForRollback.toNumber() };
+
+            // Пытаемся восстановить старый SL (может не сработать, если ордер уже исполнен на бирже)
+            await this.executionService
+              .createOrderWithRetry(
+                pair,
+                'stop_loss_limit',
+                oppositeSide,
+                oldSlAmountForRollback,
+                oldSlPriceForRollback,
+                oldSlPriceParams,
+              )
+              .then(() => {
+                this.logger.warn(
+                  `[${pair}] Старый SL ордер восстановлен. Позиция снова под защитой. Но MODIFY_POSITION провалился.`,
+                );
+              })
+              .catch((rollbackError) => {
+                this.logger.error(
+                  `[${pair}] Не удалось восстановить старый SL ордер (возможно, он уже исполнен):`,
+                  rollbackError,
+                );
+                this.logger.error(`[${pair}] КРИТИЧЕСКАЯ СИТУАЦИЯ: Позиция может остаться без защиты!`);
+              });
+          } catch (rollbackError) {
+            this.logger.error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА при попытке rollback старого SL:`, rollbackError);
+          }
+        } else {
+          this.logger.error(`[${pair}] Невозможно выполнить rollback: данные старого SL не были сохранены.`);
+        }
+
         throw createError;
       }
     }

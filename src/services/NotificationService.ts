@@ -267,7 +267,7 @@ export class NotificationService {
           COALESCE(SUM(CASE WHEN realized_pnl_usd < 0 THEN 1 ELSE 0 END), 0) as losses,
           COALESCE(AVG(CASE WHEN realized_pnl_usd > 0 THEN realized_pnl_usd END), 0) as avg_win,
           COALESCE(AVG(CASE WHEN realized_pnl_usd < 0 THEN realized_pnl_usd END), 0) as avg_loss,
-          COALESCE(SUM(fee_cost), 0) as total_fees
+          COALESCE(SUM(CASE WHEN realized_pnl_usd IS NOT NULL THEN fee_cost ELSE 0 END), 0) as total_fees
         FROM TradeHistory`,
       );
 

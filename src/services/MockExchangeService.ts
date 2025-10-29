@@ -165,11 +165,12 @@ export class MockExchangeService implements IExchangeService {
     return this.markets;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public async fetchOHLCV(
     symbol: string,
     timeframe: string,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _since?: number,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _limit?: number,
   ): Promise<IDecimalOHLCV[]> {
     this.logger.debug(`Mock fetchOHLCV: ${symbol}, ${timeframe}`);

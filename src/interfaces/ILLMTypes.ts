@@ -24,6 +24,11 @@ export interface LLMDecision {
   justification: string;
 }
 
+export interface MacroContext {
+  fear_and_greed_index: number | null;
+  fear_and_greed_text: string | null;
+}
+
 export interface LLMTriggerCondition {
   type: 'price' | 'indicator' | 'timeout';
   condition: string;

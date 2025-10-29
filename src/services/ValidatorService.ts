@@ -372,6 +372,44 @@ export class ValidatorService {
     return { roundedAmountCoin, roundedAmountUsd, roundedEntryPrice };
   }
 
+  private _validateExchangeAndBalanceRules(
+    pair: string,
+    roundedAmountUsd: DecimalValue,
+    usdAtRisk: DecimalValue,
+    accountState: AccountState,
+  ): void {
+    // Получаем правила биржи (minNotional)
+    const rules = this.exchangeRulesService.getRules(pair);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const minNotionalDecimal = rules.minNotional as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedAmountUsdDecimal = roundedAmountUsd as any;
+
+    // Проверка MinNotional
+    if (roundedAmountUsdDecimal.lt(minNotionalDecimal)) {
+      throw new ValidationError(
+        `[${pair}] Рассчитанная стоимость ордера $${roundedAmountUsdDecimal.toFixed(2)} ` +
+          `ниже биржевого минимума $${minNotionalDecimal.toString()}. ` +
+          `Увеличьте % риска или дистанцию до стопа.`,
+      );
+    }
+
+    // Проверка Баланса
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const availableBalanceDecimal = accountState.available_quote_balance as any;
+
+    if (roundedAmountUsdDecimal.gt(availableBalanceDecimal)) {
+      throw new ValidationError(
+        `[${pair}] Рассчитанная стоимость ордера $${roundedAmountUsdDecimal.toFixed(2)} ` +
+          `превышает доступный баланс $${availableBalanceDecimal.toFixed(2)}.`,
+      );
+    }
+
+    this.logger.debug(
+      `[${pair}] Exchange Rules Check: roundedAmountUsd=${roundedAmountUsdDecimal.toFixed(2)}, minNotional=${minNotionalDecimal.toString()}, availableBalance=${availableBalanceDecimal.toFixed(2)}`,
+    );
+  }
+
   private _validatePortfolioRisk(
     usdAtRisk: DecimalValue,
     accountState: AccountState,

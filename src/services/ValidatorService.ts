@@ -293,8 +293,83 @@ export class ValidatorService {
     return {
       rawAmountCoin,
       rawAmountUsd,
+      roundedAmountCoin: rawAmountCoin,
+      roundedAmountUsd: rawAmountUsd,
+      roundedEntryPrice: entryPrice,
       usdAtRisk,
+      entryPrice,
     };
+  }
+
+  private _validateAndRoundPrecision(
+    pair: string,
+    rawAmountCoin: DecimalValue,
+    rawEntryPrice: DecimalValue,
+  ): { roundedAmountCoin: DecimalValue; roundedAmountUsd: DecimalValue; roundedEntryPrice: DecimalValue } {
+    const rules = this.exchangeRulesService.getRules(pair);
+    const precision = rules.precision;
+
+    // Округляем amount (количество монеты) используя precision.amount
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawAmountCoinDecimal = rawAmountCoin as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const amountPrecisionDecimal = precision.amount as any;
+    // Вычисляем множитель на основе precision (например, 0.00000001 -> множитель 10^8)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const amountMultiplier = new DecimalConstructor(10).pow(amountPrecisionDecimal.e || 0);
+    // Округляем вниз до нужной точности
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedAmountCoin = rawAmountCoinDecimal.mul(amountMultiplier).floor().div(amountMultiplier) as DecimalValue;
+
+    // Округляем price (цену входа) используя precision.price
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawEntryPriceDecimal = rawEntryPrice as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pricePrecisionDecimal = precision.price as any;
+    // Вычисляем множитель на основе precision (например, 0.01 -> множитель 10^2)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const priceMultiplier = new DecimalConstructor(10).pow(pricePrecisionDecimal.e || 0);
+    // Округляем вниз до нужной точности
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedEntryPrice = rawEntryPriceDecimal.mul(priceMultiplier).floor().div(priceMultiplier) as DecimalValue;
+
+    // Пересчитываем amount_usd на основе округленных значений
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedAmountCoinDecimal = roundedAmountCoin as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedEntryPriceDecimal = roundedEntryPrice as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedAmountUsd = roundedAmountCoinDecimal.mul(roundedEntryPriceDecimal) as DecimalValue;
+
+    this.logger.debug(
+      `[${pair}] Округление: Qty ${rawAmountCoinDecimal.toFixed(12)} -> ${roundedAmountCoinDecimal.toString()}`,
+    );
+    this.logger.debug(
+      `[${pair}] Округление: Price ${rawEntryPriceDecimal.toFixed(5)} -> ${roundedEntryPriceDecimal.toString()}`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawAmountUsdDecimal = rawAmountCoinDecimal.mul(rawEntryPriceDecimal) as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedAmountUsdDecimal = roundedAmountUsd as any;
+    this.logger.debug(
+      `[${pair}] Округление: USD Value ${rawAmountUsdDecimal.toFixed(5)} -> ${roundedAmountUsdDecimal.toFixed(5)}`,
+    );
+
+    // Проверка нулевых значений после округления
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const zero = new DecimalConstructor(0);
+    if (
+      roundedAmountCoinDecimal.isZero() ||
+      roundedAmountCoinDecimal.eq(zero) ||
+      roundedAmountUsdDecimal.isZero() ||
+      roundedAmountUsdDecimal.eq(zero)
+    ) {
+      throw new ValidationError(
+        `[${pair}] После округления размер позиции стал 0. Увеличьте риск или дистанцию до стопа.`,
+      );
+    }
+
+    return { roundedAmountCoin, roundedAmountUsd, roundedEntryPrice };
   }
 
   private _validatePortfolioRisk(
@@ -370,7 +445,7 @@ export class ValidatorService {
     strategyContext: StrategyContext,
     marketData: MarketData,
     exchangeRules: IMarketRules,
-  ): SanityCheckResult & Partial<CalculatedAmounts> {
+  ): CalculatedAmounts {
     this.logger.debug(`Validating decision: ${decision.action} for ${decision.pair}`);
 
     // Проверка наличия позиции для CLOSE_POSITION
@@ -396,9 +471,18 @@ export class ValidatorService {
       // Уровень 3: Portfolio Risk Check
       this._validatePortfolioRisk(calculatedAmounts.usdAtRisk, accountState, strategyContext);
 
+      // Уровень 4: Precision Rounding
+      const rounded = this._validateAndRoundPrecision(
+        decision.pair,
+        calculatedAmounts.rawAmountCoin,
+        sanityResult.entryPrice,
+      );
+
       return {
         ...sanityResult,
         ...calculatedAmounts,
+        ...rounded,
+        entryPrice: sanityResult.entryPrice,
       };
     }
 
@@ -407,6 +491,9 @@ export class ValidatorService {
       ...sanityResult,
       rawAmountCoin: this.toDecimal(0),
       rawAmountUsd: this.toDecimal(0),
+      roundedAmountCoin: this.toDecimal(0),
+      roundedAmountUsd: this.toDecimal(0),
+      roundedEntryPrice: this.toDecimal(0),
       usdAtRisk: this.toDecimal(0),
     };
   }

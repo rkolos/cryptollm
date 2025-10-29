@@ -42,5 +42,9 @@ export interface SanityCheckResult {
 export interface CalculatedAmounts {
   rawAmountCoin: DecimalValue;
   rawAmountUsd: DecimalValue;
+  roundedAmountCoin: DecimalValue;
+  roundedAmountUsd: DecimalValue;
+  roundedEntryPrice: DecimalValue;
   usdAtRisk: DecimalValue;
+  entryPrice: DecimalValue;
 }

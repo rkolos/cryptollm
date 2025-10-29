@@ -183,35 +183,58 @@ export class TSLHandlerService {
       this.logger.info(`[${pair}] (TSL) Новый SL ордер [${newSlOrder.id}] создан на бирже.`);
 
       // Шаг 3: Атомарное обновление БД (критично)
-      await this.databaseService.executeInTransaction(async (client: PoolClient) => {
-        // 1. Обновить TSL_State
-        await client.query(
-          `UPDATE TSL_State 
-           SET current_stop_price = $1, current_stop_order_id = $2, price_seen = $3, updated_at = NOW()
-           WHERE pair = $4`,
-          [newStopPrice.toString(), newSlOrder.id, currentPrice.toString(), pair],
+      try {
+        await this.databaseService.executeInTransaction(async (client: PoolClient) => {
+          // 1. Обновить TSL_State
+          await client.query(
+            `UPDATE TSL_State 
+             SET current_stop_price = $1, current_stop_order_id = $2, price_seen = $3, updated_at = NOW()
+             WHERE pair = $4`,
+            [newStopPrice.toString(), newSlOrder.id, currentPrice.toString(), pair],
+          );
+
+          // 2. Удалить старый ActiveOrders
+          await client.query('DELETE FROM ActiveOrders WHERE exchange_order_id = $1', [
+            tslRule.state.currentStopOrderId,
+          ]);
+
+          // 3. Добавить новый ActiveOrders
+          await client.query(
+            `INSERT INTO ActiveOrders (exchange_order_id, pair, type, side, status, price, amount)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              newSlOrder.id,
+              pair,
+              'stop_loss_limit',
+              oppositeSide,
+              'open',
+              newStopPrice.toString(),
+              position.amount.toString(),
+            ],
+          );
+        });
+
+        this.logger.info(`[${pair}] (TSL) Обновление SL ордера завершено успешно.`);
+      } catch (dbError) {
+        // КРИТИЧЕСКИЙ СБОЙ: БД операция упала, но новый SL ордер уже создан на бирже
+        // Старый ордер уже отменен, новый нужно отменить, чтобы избежать "зомби" ордера
+        this.logger.error(
+          `[${pair}] (TSL) КРИТИЧЕСКИЙ СБОЙ: БД транзакция провалилась. Отменяем новый SL ордер...`,
+          dbError,
         );
 
-        // 2. Удалить старый ActiveOrders
-        await client.query('DELETE FROM ActiveOrders WHERE exchange_order_id = $1', [tslRule.state.currentStopOrderId]);
+        try {
+          await this.guaranteedExecutor.cancelOrderWithRetry(newSlOrder.id, pair);
+          this.logger.warn(
+            `[${pair}] (TSL) Новый SL ордер ${newSlOrder.id} отменен. Старый ордер уже отменен, TSL в несогласованном состоянии. SyncEngine восстановит состояние при следующей сверке.`,
+          );
+        } catch (cancelError) {
+          this.logger.error(`[${pair}] (TSL) Не удалось отменить новый SL ордер ${newSlOrder.id}:`, cancelError);
+        }
 
-        // 3. Добавить новый ActiveOrders
-        await client.query(
-          `INSERT INTO ActiveOrders (exchange_order_id, pair, type, side, status, price, amount)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [
-            newSlOrder.id,
-            pair,
-            'stop_loss_limit',
-            oppositeSide,
-            'open',
-            newStopPrice.toString(),
-            position.amount.toString(),
-          ],
-        );
-      });
-
-      this.logger.info(`[${pair}] (TSL) Обновление SL ордера завершено успешно.`);
+        // Пробрасываем ошибку выше
+        throw dbError;
+      }
     } catch (error) {
       this.logger.error(`[${pair}] (TSL) Ошибка при обновлении SL ордера:`, error);
       throw error; // Пробрасываем ошибку для обработки в акторе

@@ -655,9 +655,31 @@ export class SyncEngineService {
           this.logger.info(`[${pair}] Конвертация limit_open ордера [${dbOrder.exchange_order_id}] завершена успешно.`);
         } catch (error) {
           // КРИТИЧЕСКИЙ сбой: транзакция провалилась, но SL/TP уже созданы на бирже
+          // Отменяем их, чтобы избежать "зомби" ордеров
           this.logger.error(
-            `[${pair}] КРИТИЧЕСКИЙ СБОЙ: Транзакция БД провалилась после создания SL/TP ордеров. Ордера останутся как "зомби" и будут отменены на следующей итерации сверки.`,
+            `[${pair}] КРИТИЧЕСКИЙ СБОЙ: Транзакция БД провалилась после создания SL/TP ордеров. Отменяем ордера...`,
             error,
+          );
+
+          const cancelPromises: Promise<void>[] = [];
+          if (slOrderId) {
+            cancelPromises.push(
+              this.guaranteedOrderService.cancelOrderWithRetry(slOrderId, pair).catch((cancelError) => {
+                this.logger.error(`[${pair}] Не удалось отменить SL ордер ${slOrderId}:`, cancelError);
+              }),
+            );
+          }
+          if (tpOrderId) {
+            cancelPromises.push(
+              this.guaranteedOrderService.cancelOrderWithRetry(tpOrderId, pair).catch((cancelError) => {
+                this.logger.error(`[${pair}] Не удалось отменить TP ордер ${tpOrderId}:`, cancelError);
+              }),
+            );
+          }
+
+          await Promise.allSettled(cancelPromises);
+          this.logger.warn(
+            `[${pair}] SL/TP ордера отменены. Позиция открыта (limit_open исполнен), но не записана в БД. SyncEngine восстановит состояние при следующей сверке.`,
           );
           // Не пробрасываем ошибку дальше, чтобы не сломать SyncEngine
         }

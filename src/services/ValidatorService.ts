@@ -523,7 +523,7 @@ export class ValidatorService {
     accountState: AccountState,
     strategyContext: StrategyContext,
     marketData: MarketData,
-    exchangeRules: IMarketRules,
+    _exchangeRules: IMarketRules,
   ): CalculatedAmounts {
     this.logger.debug(`Validating decision: ${decision.action} for ${decision.pair}`);
 

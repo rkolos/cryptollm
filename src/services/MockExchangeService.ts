@@ -165,7 +165,7 @@ export class MockExchangeService implements IExchangeService {
     return this.markets;
   }
 
-  public async fetchOHLCV(symbol: string, timeframe: string, since?: number, limit?: number): Promise<IDecimalOHLCV[]> {
+  public async fetchOHLCV(symbol: string, timeframe: string, _since?: number, _limit?: number): Promise<IDecimalOHLCV[]> {
     this.logger.debug(`Mock fetchOHLCV: ${symbol}, ${timeframe}`);
     const currentPrice = this.currentPrices.get(symbol) || (new DecimalConstructor(30000) as DecimalType);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,7 +197,7 @@ export class MockExchangeService implements IExchangeService {
     };
   }
 
-  public async fetchOrderBook(symbol: string, limit?: number): Promise<IDecimalOrderBook> {
+  public async fetchOrderBook(symbol: string, _limit?: number): Promise<IDecimalOrderBook> {
     const currentPrice = this.currentPrices.get(symbol) || (new DecimalConstructor(30000) as DecimalType);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const currentPriceDecimal = currentPrice as any;
@@ -419,7 +419,7 @@ export class MockExchangeService implements IExchangeService {
     this.logger.info(`Mock order ${orderId} cancelled.`);
   }
 
-  public async fetchOrder(orderId: string, symbol: string): Promise<IDecimalOrder> {
+  public async fetchOrder(orderId: string, _symbol: string): Promise<IDecimalOrder> {
     const order = this.openOrders.get(orderId);
     if (!order) {
       const trade = this.tradeHistory.find((t) => t.order === orderId);
@@ -502,7 +502,7 @@ export class MockExchangeService implements IExchangeService {
     }));
   }
 
-  public async watchTickers(symbols: string[], callback: (ticker: IDecimalTicker) => Promise<void>): Promise<void> {
+  public async watchTickers(_symbols: string[], _callback: (ticker: IDecimalTicker) => Promise<void>): Promise<void> {
     this.logger.warn('MockExchangeService.watchTickers() called. This is a stub method and does nothing.');
   }
 

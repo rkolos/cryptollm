@@ -1,5 +1,4 @@
 import Decimal from 'decimal.js';
-import type { IDecimalOHLCV } from './IExchangeService.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const decimalInstance = new (Decimal as any)(0);

@@ -1,6 +1,4 @@
 import Decimal from 'decimal.js';
-import type { LLMDecision } from './ILLMTypes.js';
-import type { IMarketRules } from './IMarketRules.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const decimalInstance = new (Decimal as any)(0);

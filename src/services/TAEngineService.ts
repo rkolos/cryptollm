@@ -2,14 +2,7 @@ import Decimal from 'decimal.js';
 import { EMA, RSI, MACD, BollingerBands, ADX, ATR, OBV, VWAP, Stochastic } from 'technicalindicators';
 import { LoggingService } from './LoggingService.js';
 import type { IDecimalOHLCV } from '../interfaces/IExchangeService.js';
-import type {
-  AnalysisResult,
-  TAInput,
-  DecimalValue,
-  KeyLevels,
-  BollingerBands as IBollingerBands,
-  MACDResult,
-} from '../interfaces/ITATypes.js';
+import type { AnalysisResult, TAInput, DecimalValue, KeyLevels } from '../interfaces/ITATypes.js';
 import type winston from 'winston';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

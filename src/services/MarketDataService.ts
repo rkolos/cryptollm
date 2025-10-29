@@ -1,11 +1,6 @@
 import Decimal from 'decimal.js';
 import { LoggingService } from './LoggingService.js';
-import type {
-  IExchangeService,
-  IDecimalOHLCV,
-  IDecimalOrderBook,
-  IDecimalTrade,
-} from '../interfaces/IExchangeService.js';
+import type { IExchangeService, IDecimalOHLCV } from '../interfaces/IExchangeService.js';
 import type { AggregatedOrderBook, RecentTrade, DetailedMarketData, DecimalValue } from '../interfaces/ITATypes.js';
 import type winston from 'winston';
 

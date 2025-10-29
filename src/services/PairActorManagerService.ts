@@ -32,7 +32,7 @@ export class PairActorManagerService {
     const previousTask = this.promiseQueues.get(pair) || Promise.resolve();
 
     // 2. Создаем "обертку" для новой задачи.
-    const taskWrapper = async (): Promise<T> => {
+    const taskWrapper = async (): Promise<void> => {
       try {
         // 3. (Критично) Ждем, пока предыдущая задача завершится.
         // Мы используем .catch(), чтобы дождаться завершения,
@@ -49,10 +49,10 @@ export class PairActorManagerService {
       // 4. (Критично) Только теперь, когда очередь дошла до нас,
       // мы *выполняем* саму задачу.
       // Ошибки (rejects) будут проброшены в `return` этого Promise.
-      return task();
+      await task();
     };
 
-    // 5. Вызываем нашу "обертку".
+    // 5. Вызываем нашу "обертку" и сохраняем Promise<void> в Map
     const nextTaskPromise = taskWrapper();
 
     // 6. (Критично) Обновляем "хвост" очереди в Map.
@@ -68,10 +68,13 @@ export class PairActorManagerService {
       }),
     );
 
-    // 7. Возвращаем оригинальный Promise.
+    // 7. Выполняем задачу отдельно для получения результата.
     // Вызывающая сторона (e.g., TSLHandler) получит либо `resolve(T)`,
     // либо `reject(error)` от `task()`.
-    return nextTaskPromise;
+    await previousTask.catch(() => {
+      // Игнорируем ошибку предыдущей задачи
+    });
+    return await task();
   }
 
   /**

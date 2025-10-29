@@ -132,8 +132,10 @@ export class SyncEngineService {
   // (STUB - Задача 5.1: Логика Сверки - Ордера)
   private async _reconcileOrders(
     pair: string,
-    exchangeOrders: IDecimalOrder[],
-    dbOrders: DbOrder[],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _exchangeOrders: IDecimalOrder[],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _dbOrders: DbOrder[],
   ): Promise<void> {
     this.logger.debug(`[${pair}] (STUB) _reconcileOrders...`);
     // Логика Сценариев 3 и 4 из `about.md` будет здесь
@@ -142,8 +144,10 @@ export class SyncEngineService {
   // (STUB - Задача 5.1.1: Логика Сверки - "Судебная" Сверка Позиций)
   private async _reconcilePositionsForensic(
     pair: string,
-    dbPositions: DbPosition[],
-    dbOrders: DbOrder[],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _dbPositions: DbPosition[],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _dbOrders: DbOrder[],
   ): Promise<void> {
     this.logger.debug(`[${pair}] (STUB) _reconcilePositionsForensic...`);
     // Логика "судебной" сверки на основе TradeHistory будет здесь
@@ -152,8 +156,10 @@ export class SyncEngineService {
   // (STUB - Задача 5.1.2: Логика Сверки - Исполнение OPEN_LIMIT)
   private async _reconcileOpenLimitOrders(
     pair: string,
-    exchangeOrders: IDecimalOrder[],
-    dbOrders: DbOrder[],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _exchangeOrders: IDecimalOrder[],
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _dbOrders: DbOrder[],
   ): Promise<void> {
     this.logger.debug(`[${pair}] (STUB) _reconcileOpenLimitOrders...`);
     // Логика обработки частично/полностью исполненных OPEN_LIMIT будет здесь

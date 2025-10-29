@@ -165,6 +165,7 @@ export class MockExchangeService implements IExchangeService {
     return this.markets;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public async fetchOHLCV(symbol: string, timeframe: string, _since?: number, _limit?: number): Promise<IDecimalOHLCV[]> {
     this.logger.debug(`Mock fetchOHLCV: ${symbol}, ${timeframe}`);
     const currentPrice = this.currentPrices.get(symbol) || (new DecimalConstructor(30000) as DecimalType);
@@ -197,6 +198,7 @@ export class MockExchangeService implements IExchangeService {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public async fetchOrderBook(symbol: string, _limit?: number): Promise<IDecimalOrderBook> {
     const currentPrice = this.currentPrices.get(symbol) || (new DecimalConstructor(30000) as DecimalType);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -419,6 +421,7 @@ export class MockExchangeService implements IExchangeService {
     this.logger.info(`Mock order ${orderId} cancelled.`);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public async fetchOrder(orderId: string, _symbol: string): Promise<IDecimalOrder> {
     const order = this.openOrders.get(orderId);
     if (!order) {
@@ -502,6 +505,7 @@ export class MockExchangeService implements IExchangeService {
     }));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public async watchTickers(_symbols: string[], _callback: (ticker: IDecimalTicker) => Promise<void>): Promise<void> {
     this.logger.warn('MockExchangeService.watchTickers() called. This is a stub method and does nothing.');
   }

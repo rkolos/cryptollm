@@ -518,6 +518,7 @@ export class ValidatorService {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public validateDecision(
     decision: LLMDecision,
     accountState: AccountState,

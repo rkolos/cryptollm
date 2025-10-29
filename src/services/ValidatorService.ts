@@ -408,6 +408,47 @@ export class ValidatorService {
     this.logger.debug(
       `[${pair}] Exchange Rules Check: roundedAmountUsd=${roundedAmountUsdDecimal.toFixed(2)}, minNotional=${minNotionalDecimal.toString()}, availableBalance=${availableBalanceDecimal.toFixed(2)}`,
     );
+
+    // Уровень 4 (Часть 3): Fee vs Risk Check
+    this._validateFeeVsRisk(pair, roundedAmountUsd, usdAtRisk);
+  }
+
+  private _validateFeeVsRisk(pair: string, roundedAmountUsd: DecimalValue, usdAtRisk: DecimalValue): void {
+    // Получаем комиссию 'taker'
+    const rules = this.exchangeRulesService.getRules(pair);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const takerFeeDecimal = rules.takerFee as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundedAmountUsdDecimal = roundedAmountUsd as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const usdAtRiskDecimal = usdAtRisk as any;
+
+    // Рассчитываем комиссию за "туда-обратно" (round-trip)
+    // one_way_fee = roundedAmountUsd * takerFee
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oneWayFeeUsd = roundedAmountUsdDecimal.mul(takerFeeDecimal) as DecimalValue;
+    // round_trip_fee = one_way_fee * 2
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oneWayFeeUsdDecimal = oneWayFeeUsd as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const two = new DecimalConstructor(2);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundTripFeeUsd = oneWayFeeUsdDecimal.mul(two) as DecimalValue;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const roundTripFeeUsdDecimal = roundTripFeeUsd as any;
+    this.logger.debug(
+      `[${pair}] Проверка Комиссии: Риск $${usdAtRiskDecimal.toFixed(4)} vs Комиссия $${roundTripFeeUsdDecimal.toFixed(4)}`,
+    );
+
+    // Проверяем, что Риск > Комиссии
+    if (usdAtRiskDecimal.lte(roundTripFeeUsdDecimal)) {
+      throw new ValidationError(
+        `[${pair}] Сделка невыгодна: Потенциальный убыток (Риск) $${usdAtRiskDecimal.toFixed(4)} ` +
+          `меньше или равен гарантированным комиссиям $${roundTripFeeUsdDecimal.toFixed(4)}. ` +
+          `Увеличьте дистанцию до стопа.`,
+      );
+    }
   }
 
   private _validatePortfolioRisk(
@@ -524,7 +565,7 @@ export class ValidatorService {
         accountState,
       );
 
-      this.logger.info(`[${decision.pair}] Валидация Уровня 4 (Balance, MinNotional) пройдена.`);
+      this.logger.info(`[${decision.pair}] Валидация Уровня 4 (Balance, MinNotional, Fee vs Risk) пройдена.`);
       this.logger.info(`[${decision.pair}] ВАЛИДАЦИЯ УСПЕШНА. Ордер готов к исполнению.`);
 
       return {

@@ -3,6 +3,7 @@ import { DatabaseService } from './DatabaseService.js';
 import { PairActorManagerService } from './PairActorManagerService.js';
 import { LoggingService } from './LoggingService.js';
 import { ExchangeRulesService } from './ExchangeRulesService.js';
+import { GuaranteedOrderExecutionService } from './GuaranteedOrderExecutionService.js';
 import { OrderNotFoundError } from '../errors/ExchangeErrors.js';
 import Decimal from 'decimal.js';
 import type { IExchangeService, IDecimalOrder, IDecimalBalance, DecimalValue } from '../interfaces/IExchangeService.js';
@@ -68,6 +69,7 @@ export class SyncEngineService {
   private readonly exchangeService: IExchangeService;
   private readonly pairActorManager: PairActorManagerService;
   private readonly exchangeRulesService: ExchangeRulesService;
+  private readonly guaranteedOrderService: GuaranteedOrderExecutionService;
 
   private constructor(
     configService: ConfigService,
@@ -75,12 +77,14 @@ export class SyncEngineService {
     exchangeService: IExchangeService,
     pairActorManager: PairActorManagerService,
     exchangeRulesService: ExchangeRulesService,
+    guaranteedOrderService: GuaranteedOrderExecutionService,
   ) {
     this.configService = configService;
     this.databaseService = databaseService;
     this.exchangeService = exchangeService;
     this.pairActorManager = pairActorManager;
     this.exchangeRulesService = exchangeRulesService;
+    this.guaranteedOrderService = guaranteedOrderService;
     this.logger = LoggingService.getInstance().getLogger('SyncEngine');
     this.logger.info('SyncEngineService initialized.');
   }
@@ -91,6 +95,7 @@ export class SyncEngineService {
     exchangeService: IExchangeService,
     pairActorManager: PairActorManagerService,
     exchangeRulesService: ExchangeRulesService,
+    guaranteedOrderService: GuaranteedOrderExecutionService,
   ): SyncEngineService {
     if (!SyncEngineService.instance) {
       SyncEngineService.instance = new SyncEngineService(
@@ -99,6 +104,7 @@ export class SyncEngineService {
         exchangeService,
         pairActorManager,
         exchangeRulesService,
+        guaranteedOrderService,
       );
     }
     return SyncEngineService.instance;
@@ -204,7 +210,7 @@ export class SyncEngineService {
       if (!dbOrderIds.has(exchangeOrder.id)) {
         this.logger.warn(`[${pair}] Обнаружен ордер-зомби [${exchangeOrder.id}] по [${pair}]! Немедленно отменяем...`);
         try {
-          await this.exchangeService.cancelOrder(exchangeOrder.id, pair);
+          await this.guaranteedOrderService.cancelOrderWithRetry(exchangeOrder.id, pair);
           this.logger.info(`[${pair}] Ордер-зомби [${exchangeOrder.id}] успешно отменен.`);
         } catch (error) {
           // Если ордер уже не существует (OrderNotFoundError), это нормально
@@ -512,7 +518,7 @@ export class SyncEngineService {
           try {
             const slPrice = new DecimalConstructor(dbOrder.target_stop_loss_price);
             // Используем STOP_LOSS_LIMIT для защиты от проскальзывания
-            const slOrder = await this.exchangeService.createOrder(
+            const slOrder = await this.guaranteedOrderService.createOrderWithRetry(
               pair,
               'STOP_LOSS_LIMIT',
               oppositeSide,
@@ -532,7 +538,7 @@ export class SyncEngineService {
           try {
             const tpPrice = new DecimalConstructor(dbOrder.target_take_profit_price);
             // TP - это обычный Limit ордер
-            const tpOrder = await this.exchangeService.createOrder(
+            const tpOrder = await this.guaranteedOrderService.createOrderWithRetry(
               pair,
               'limit',
               oppositeSide,

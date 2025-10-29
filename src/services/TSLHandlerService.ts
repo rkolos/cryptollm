@@ -193,9 +193,7 @@ export class TSLHandlerService {
         );
 
         // 2. Удалить старый ActiveOrders
-        await client.query('DELETE FROM ActiveOrders WHERE exchange_order_id = $1', [
-          tslRule.state.currentStopOrderId,
-        ]);
+        await client.query('DELETE FROM ActiveOrders WHERE exchange_order_id = $1', [tslRule.state.currentStopOrderId]);
 
         // 3. Добавить новый ActiveOrders
         await client.query(
@@ -220,4 +218,3 @@ export class TSLHandlerService {
     }
   }
 }
-

@@ -106,7 +106,9 @@ export class FastCycleService {
         // Если мы здесь, значит ccxt "отвалился" штатно (без ошибки)
         this.logger.info('(FastCycle) watchTickers завершился штатно. Переподключение...');
       } catch (error) {
-        this.logger.error(`(FastCycle) Ошибка watchTickers: ${String(error)}. Переподключение через ${reconnectDelayMs} мс...`);
+        this.logger.error(
+          `(FastCycle) Ошибка watchTickers: ${String(error)}. Переподключение через ${reconnectDelayMs} мс...`,
+        );
 
         // Если это не остановка, ждем перед переподключением
         if (!this.isStopping) {
@@ -135,10 +137,7 @@ export class FastCycleService {
       // (Задача 5.5) Делегирование Price Triggers (без await)
       this.priceTriggerHandler.handleTicker(ticker);
     } catch (error) {
-      this.logger.error(
-        `(FastCycle) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ обработчика "тика": ${String(error)}`,
-        error,
-      );
+      this.logger.error(`(FastCycle) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ обработчика "тика": ${String(error)}`, error);
       // Не бросаем ошибку, чтобы не "убить" WS-цикл
     }
   }
@@ -150,4 +149,3 @@ export class FastCycleService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
-

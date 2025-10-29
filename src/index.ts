@@ -149,7 +149,8 @@ async function main(): Promise<void> {
       macroContextService,
     );
 
-    const validatorService = ValidatorService.getInstance(exchangeRulesService);
+    // ValidatorService будет использоваться в WorkerService (задача 7.1)
+    // const validatorService = ValidatorService.getInstance(exchangeRulesService);
     const workerService = WorkerService.getInstance(databaseService);
 
     const syncEngine = SyncEngineService.getInstance(

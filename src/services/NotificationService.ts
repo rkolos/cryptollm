@@ -257,41 +257,34 @@ export class NotificationService {
     }
 
     try {
-      // Получаем все закрытые позиции (сделки со realized_pnl_usd)
-      const closedPositionsResult = await this.databaseService.query(
+      // Оптимизированный запрос: объединяем все 3 запроса в один для улучшения производительности
+      const summaryResult = await this.databaseService.query(
         `SELECT 
-          COUNT(*) as total_closed,
-          COALESCE(SUM(realized_pnl_usd), 0) as total_pnl,
+          COUNT(*) as total_trades,
+          COUNT(CASE WHEN realized_pnl_usd IS NOT NULL THEN 1 END) as total_closed,
+          COALESCE(SUM(CASE WHEN realized_pnl_usd IS NOT NULL THEN realized_pnl_usd ELSE 0 END), 0) as total_pnl,
           COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) as wins,
           COALESCE(SUM(CASE WHEN realized_pnl_usd < 0 THEN 1 ELSE 0 END), 0) as losses,
           COALESCE(AVG(CASE WHEN realized_pnl_usd > 0 THEN realized_pnl_usd END), 0) as avg_win,
-          COALESCE(AVG(CASE WHEN realized_pnl_usd < 0 THEN realized_pnl_usd END), 0) as avg_loss
-        FROM TradeHistory 
-        WHERE realized_pnl_usd IS NOT NULL`,
+          COALESCE(AVG(CASE WHEN realized_pnl_usd < 0 THEN realized_pnl_usd END), 0) as avg_loss,
+          COALESCE(SUM(fee_cost), 0) as total_fees
+        FROM TradeHistory`,
       );
 
-      // Получаем общее количество сделок
-      const totalTradesResult = await this.databaseService.query(`SELECT COUNT(*) as total FROM TradeHistory`);
-
-      // Получаем общие комиссии
-      const totalFeesResult = await this.databaseService.query(
-        `SELECT COALESCE(SUM(fee_cost), 0) as total_fees FROM TradeHistory`,
-      );
-
-      const closedPositionsRow = closedPositionsResult.rows[0];
-      const totalTrades = parseInt(totalTradesResult.rows[0].total || '0', 10);
-      const closedPositions = parseInt(closedPositionsRow.total_closed || '0', 10);
-      const wins = parseInt(closedPositionsRow.wins || '0', 10);
-      const losses = parseInt(closedPositionsRow.losses || '0', 10);
-      const totalRealizedPnl = new DecimalConstructor(closedPositionsRow.total_pnl || '0') as DecimalValue;
-      const totalFees = new DecimalConstructor(totalFeesResult.rows[0].total_fees || '0') as DecimalValue;
+      const summaryRow = summaryResult.rows[0];
+      const totalTrades = parseInt(summaryRow.total_trades || '0', 10);
+      const closedPositions = parseInt(summaryRow.total_closed || '0', 10);
+      const wins = parseInt(summaryRow.wins || '0', 10);
+      const losses = parseInt(summaryRow.losses || '0', 10);
+      const totalRealizedPnl = new DecimalConstructor(summaryRow.total_pnl || '0') as DecimalValue;
+      const totalFees = new DecimalConstructor(summaryRow.total_fees || '0') as DecimalValue;
       const avgWin =
         closedPositions > 0 && wins > 0
-          ? (new DecimalConstructor(closedPositionsRow.avg_win || '0') as DecimalValue)
+          ? (new DecimalConstructor(summaryRow.avg_win || '0') as DecimalValue)
           : (new DecimalConstructor('0') as DecimalValue);
       const avgLoss =
         closedPositions > 0 && losses > 0
-          ? (new DecimalConstructor(closedPositionsRow.avg_loss || '0') as DecimalValue)
+          ? (new DecimalConstructor(summaryRow.avg_loss || '0') as DecimalValue)
           : (new DecimalConstructor('0') as DecimalValue);
       const winRate = closedPositions > 0 ? (wins / closedPositions) * 100 : 0;
 

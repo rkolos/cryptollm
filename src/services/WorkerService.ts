@@ -551,7 +551,11 @@ export class WorkerService {
    * Реализация CLOSE_POSITION (Market) - Задача 7.3
    * Немедленное закрытие позиции через market ордер
    */
-  private async _handleCloseMarketPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
+  private async _handleCloseMarketPosition(
+    decision: LLMDecision,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _validationResult: CalculatedAmounts,
+  ): Promise<void> {
     const { pair } = decision;
 
     this.logger.debug(`[${pair}] Запуск _handleCloseMarketPosition.`);

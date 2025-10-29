@@ -71,3 +71,9 @@ export interface DetailedMarketData {
   orderBook: AggregatedOrderBook | null;
   recentTrades: RecentTrade[];
 }
+
+export interface WatchlistOverviewItem {
+  pair: string;
+  current_price: DecimalValue | null;
+  rsi_1h: DecimalValue | null;
+}

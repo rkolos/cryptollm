@@ -77,7 +77,7 @@ export class ProductionExchangeService implements IExchangeService {
     }
   }
 
-  private toDecimal(value: number | string | undefined | null): Decimal {
+  private toDecimal(value: number | string | undefined | null): DecimalValue {
     if (value === undefined || value === null) {
       return new (Decimal as any)(0);
     }
@@ -159,8 +159,8 @@ export class ProductionExchangeService implements IExchangeService {
     symbol: string,
     type: string,
     side: 'buy' | 'sell',
-    amount: Decimal,
-    price?: Decimal,
+    amount: DecimalValue,
+    price?: DecimalValue,
     params?: Record<string, unknown>,
   ): Promise<IDecimalOrder> {
     return await this.execute(async () => {
@@ -173,7 +173,7 @@ export class ProductionExchangeService implements IExchangeService {
         ...params,
       };
 
-      const order = await this.ccxtExchange.createOrder(orderParams.symbol, orderParams.type, orderParams.side, orderParams.amount, orderParams.price, orderParams);
+      const order = await this.ccxtExchange.createOrder(symbol, type as ccxt.OrderType, side as ccxt.OrderSide, amount.toNumber(), price?.toNumber(), params);
       return {
         id: String(order.id),
         clientOrderId: order.clientOrderId ? String(order.clientOrderId) : undefined,
@@ -240,10 +240,10 @@ export class ProductionExchangeService implements IExchangeService {
   public async fetchMyTrades(symbol?: string, since?: number, limit?: number): Promise<IDecimalTrade[]> {
     return await this.execute(async () => {
       const trades = await this.ccxtExchange.fetchMyTrades(symbol, since, limit);
-      return trades.map((trade) => ({
-        id: trade.id,
-        order: trade.order || '',
-        symbol: trade.symbol,
+      return trades.map((trade: any) => ({
+        id: String(trade.id || ''),
+        order: trade.order ? String(trade.order) : '',
+        symbol: String(trade.symbol || ''),
         side: trade.side as 'buy' | 'sell',
         amount: this.toDecimal(trade.amount),
         price: this.toDecimal(trade.price),

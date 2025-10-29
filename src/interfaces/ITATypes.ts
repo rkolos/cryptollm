@@ -50,3 +50,24 @@ export interface TAInput {
   close: number[];
   volume: number[];
 }
+
+export interface AggregatedOrderBook {
+  best_bid: DecimalValue | null;
+  best_ask: DecimalValue | null;
+  spread: DecimalValue | null;
+  aggregated_bid_volume_0_5_percent: DecimalValue | null;
+  aggregated_ask_volume_0_5_percent: DecimalValue | null;
+}
+
+export interface RecentTrade {
+  timestamp: number;
+  price: DecimalValue;
+  amount: DecimalValue;
+  side: 'buy' | 'sell';
+}
+
+export interface DetailedMarketData {
+  ohlcv: import('./IExchangeService.js').IDecimalOHLCV[];
+  orderBook: AggregatedOrderBook | null;
+  recentTrades: RecentTrade[];
+}

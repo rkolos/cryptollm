@@ -3,7 +3,7 @@ import Decimal from 'decimal.js';
 import { ConfigService } from './ConfigService.js';
 import { LoggingService } from './LoggingService.js';
 import { GlobalStateService } from './GlobalStateService.js';
-import type { IExchangeService } from '../interfaces/IExchangeService.js';
+import type { IExchangeService, DecimalValue } from '../interfaces/IExchangeService.js';
 import type {
   IDecimalOHLCV,
   IDecimalTicker,
@@ -81,7 +81,7 @@ export class ProductionExchangeService implements IExchangeService {
     if (value === undefined || value === null) {
       return new (Decimal as any)(0);
     }
-    return new (Decimal as any)(String(value));
+    return new Decimal(String(value));
   }
 
   public async loadMarkets(): Promise<void> {

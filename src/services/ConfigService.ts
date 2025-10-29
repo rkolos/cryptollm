@@ -124,4 +124,9 @@ export class ConfigService {
   public getDryRunInitialBalance(): number {
     return this.config.DRY_RUN_INITIAL_USDT ?? 10000;
   }
+
+  public getSlowCycleIntervalMs(): number {
+    // Дефолтное значение 60 секунд
+    return 60000;
+  }
 }

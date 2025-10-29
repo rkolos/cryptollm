@@ -1,38 +1,36 @@
 import Decimal from 'decimal.js';
 
-type DecimalType = Decimal;
-
 export interface IDecimalOHLCV {
   timestamp: number;
-  open: DecimalType;
-  high: DecimalType;
-  low: DecimalType;
-  close: DecimalType;
-  volume: DecimalType;
+  open: Decimal;
+  high: Decimal;
+  low: Decimal;
+  close: Decimal;
+  volume: Decimal;
 }
 
 export interface IDecimalTicker {
   symbol: string;
-  last: DecimalType;
-  bid: DecimalType;
-  ask: DecimalType;
-  baseVolume: DecimalType;
-  quoteVolume: DecimalType;
+  last: Decimal;
+  bid: Decimal;
+  ask: Decimal;
+  baseVolume: Decimal;
+  quoteVolume: Decimal;
   timestamp?: number;
 }
 
 export interface IDecimalOrderBook {
   symbol: string;
-  bids: Array<[DecimalType, DecimalType]>;
-  asks: Array<[DecimalType, DecimalType]>;
+  bids: Array<[Decimal, Decimal]>;
+  asks: Array<[Decimal, Decimal]>;
   timestamp?: number;
 }
 
 export interface IDecimalBalance {
   [currency: string]: {
-    free: DecimalType;
-    used: DecimalType;
-    total: DecimalType;
+    free: Decimal;
+    used: Decimal;
+    total: Decimal;
   };
 }
 
@@ -42,12 +40,12 @@ export interface IDecimalOrder {
   symbol: string;
   type: string;
   side: 'buy' | 'sell';
-  amount: DecimalType;
-  price?: DecimalType;
+  amount: Decimal;
+  price?: Decimal;
   status: string;
-  filled?: DecimalType;
-  remaining?: DecimalType;
-  cost?: DecimalType;
+  filled?: Decimal;
+  remaining?: Decimal;
+  cost?: Decimal;
   timestamp?: number;
 }
 
@@ -56,11 +54,11 @@ export interface IDecimalTrade {
   order: string;
   symbol: string;
   side: 'buy' | 'sell';
-  amount: DecimalType;
-  price: DecimalType;
-  cost: DecimalType;
+  amount: Decimal;
+  price: Decimal;
+  cost: Decimal;
   fee: {
-    cost: DecimalType;
+    cost: Decimal;
     currency: string;
   };
   timestamp: number;
@@ -76,8 +74,8 @@ export interface IExchangeService {
     symbol: string,
     type: string,
     side: 'buy' | 'sell',
-    amount: DecimalType,
-    price?: DecimalType,
+    amount: Decimal,
+    price?: Decimal,
     params?: Record<string, unknown>,
   ): Promise<IDecimalOrder>;
   cancelOrder(orderId: string, symbol: string): Promise<void>;

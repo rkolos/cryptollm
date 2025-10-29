@@ -77,11 +77,11 @@ export class ProductionExchangeService implements IExchangeService {
     }
   }
 
-  private toDecimal(value: number | string | undefined): Decimal {
+  private toDecimal(value: number | string | undefined | null): Decimal {
     if (value === undefined || value === null) {
-      return new Decimal(0);
+      return new (Decimal as any)(0);
     }
-    return new Decimal(value);
+    return new (Decimal as any)(String(value));
   }
 
   public async loadMarkets(): Promise<void> {
@@ -124,9 +124,9 @@ export class ProductionExchangeService implements IExchangeService {
     return await this.execute(async () => {
       const orderBook = await this.ccxtExchange.fetchOrderBook(symbol, limit);
       return {
-        symbol: orderBook.symbol,
-        bids: orderBook.bids.map((bid) => [this.toDecimal(bid[0]), this.toDecimal(bid[1])]),
-        asks: orderBook.asks.map((ask) => [this.toDecimal(ask[0]), this.toDecimal(ask[1])]),
+        symbol: String(orderBook.symbol || ''),
+        bids: orderBook.bids.map((bid: any) => [this.toDecimal(bid[0]), this.toDecimal(bid[1])]),
+        asks: orderBook.asks.map((ask: any) => [this.toDecimal(ask[0]), this.toDecimal(ask[1])]),
         timestamp: orderBook.timestamp,
       };
     });
@@ -173,7 +173,7 @@ export class ProductionExchangeService implements IExchangeService {
         ...params,
       };
 
-      const order = await this.ccxtExchange.createOrder(orderParams);
+      const order = await this.ccxtExchange.createOrder(orderParams.symbol, orderParams.type, orderParams.side, orderParams.amount, orderParams.price, orderParams);
       return {
         id: String(order.id),
         clientOrderId: order.clientOrderId ? String(order.clientOrderId) : undefined,

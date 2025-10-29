@@ -1,13 +1,9 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { NotificationService } from '../NotificationService.js';
 import { ConfigService } from '../ConfigService.js';
 import { DatabaseService } from '../DatabaseService.js';
 import { AccountStateService } from '../AccountStateService.js';
 import { MockDataFactory } from '../../__tests__/mocks/MockData.js';
-import type { DecimalValue } from '../../interfaces/IValidatorTypes.js';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const DecimalConstructor = require('decimal.js') as any;
 
 describe('NotificationService', () => {
   let notificationService: NotificationService;
@@ -115,6 +111,9 @@ describe('NotificationService', () => {
 
       notificationService.sendTradingSummary('CLOSE_POSITION', 'BTC/USDT', 'Test justification');
 
+      // Даём время на обработку очереди
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
       expect(mockDatabaseService.query).toHaveBeenCalled();
       // Проверяем, что был вызван оптимизированный запрос (один запрос вместо трёх)
       expect(mockDatabaseService.query).toHaveBeenCalledTimes(1);
@@ -150,6 +149,9 @@ describe('NotificationService', () => {
       });
 
       notificationService.sendTradingSummary('CLOSE_POSITION', 'ETH/USDT', 'Test justification');
+
+      // Даём время на обработку очереди
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       expect(mockDatabaseService.query).toHaveBeenCalled();
     });

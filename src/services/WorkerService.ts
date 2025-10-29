@@ -261,7 +261,7 @@ export class WorkerService {
       // Логика Задачи 7.2
       await this._handleOpenMarketPosition(decision, validationResult);
     } else if (type === 'limit') {
-      // Логика Задачи 7.2.1 (заглушка)
+      // Логика Задачи 7.2.1
       await this._handleOpenLimitPosition(decision, validationResult);
     } else {
       throw new Error(`[${decision.pair}] Неизвестный тип ордера в handleOpenPosition: ${type}`);
@@ -540,7 +540,7 @@ export class WorkerService {
       // Логика Задачи 7.3
       await this._handleCloseMarketPosition(decision, validationResult);
     } else if (type === 'limit') {
-      // Логика Задачи 7.3.1 (заглушка)
+      // Логика Задачи 7.3.1
       await this._handleCloseLimitPosition(decision, validationResult);
     } else {
       throw new Error(`[${decision.pair}] Неизвестный тип ордера в handleClosePosition: ${type}`);

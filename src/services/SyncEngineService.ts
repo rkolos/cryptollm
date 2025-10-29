@@ -178,7 +178,7 @@ export class SyncEngineService {
         dbOrders, // Наше состояние
       );
 
-      // (STUB - Задача 5.1.1: "Судебная" сверка)
+      // Задача 5.1.1: "Судебная" сверка позиций
       await this._reconcilePositionsForensic(
         pair,
         dbPositions, // Наши позиции
@@ -186,7 +186,7 @@ export class SyncEngineService {
         exchangeBalance, // Баланс для проверки
       );
 
-      // (STUB - Задача 5.1.2: Исполнение OPEN_LIMIT)
+      // Задача 5.1.2: Исполнение OPEN_LIMIT ордеров
       await this._reconcileOpenLimitOrders(
         pair,
         exchangeOrders, // Реальное состояние

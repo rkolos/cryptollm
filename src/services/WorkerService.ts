@@ -1,4 +1,5 @@
 import * as ccxt from 'ccxt';
+import Decimal from 'decimal.js';
 import { LoggingService } from './LoggingService.js';
 import { ValidatorService } from './ValidatorService.js';
 import { GuaranteedOrderExecutionService } from './GuaranteedOrderExecutionService.js';
@@ -11,8 +12,13 @@ import { ExchangeRulesService } from './ExchangeRulesService.js';
 import { ConfigService } from './ConfigService.js';
 import type { LLMDecision } from '../interfaces/ILLMTypes.js';
 import type { AccountState, MarketData, StrategyContext, CalculatedAmounts } from '../interfaces/IValidatorTypes.js';
+import type { IDecimalOrder } from '../interfaces/IExchangeService.js';
 import { InsufficientFundsError } from '../errors/ExchangeErrors.js';
 import type winston from 'winston';
+import type { PoolClient } from 'pg';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DecimalConstructor = Decimal as any;
 
 /**
  * WorkerService - Диспетчер "Исполнителя"
@@ -178,6 +184,22 @@ export class WorkerService {
       const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);
       this.logger.error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА ИСПОЛНЕНИЯ: ${errorMessage}`);
 
+      // Обработка ошибки уникальности (unique violation) - позиция уже существует
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dbError = executionError as any;
+      if (dbError.code === '23505') {
+        // unique_violation
+        this.logger.error(
+          `[${pair}] Ошибка уникальности БД (23505)! Позиция, вероятно, уже существует. Запуск принудительной синхронизации...`,
+        );
+        this.notificationService.sendAlert(
+          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА СИНХРОНИЗАЦИИ (23505)! Попытка открыть уже открытую позицию. Требуется проверка.`,
+          false,
+        );
+        // Принудительно обновляем кэш, т.к. он явно не совпадает с БД
+        await this.accountStateService.refreshNow();
+      }
+
       // Обновляем лог в БД
       await this._updateDecisionLog(llm_decision_log_id, 'failed_by_worker', null, errorMessage);
 
@@ -227,16 +249,226 @@ export class WorkerService {
     }
   }
 
-  // --- ЗАГЛУШКИ: Будут реализованы в 7.2 - 7.5 ---
+  // --- РЕАЛИЗАЦИЯ: Задачи 7.2 - 7.5 ---
 
-  private async handleOpenPosition(
+  /**
+   * Обработчик открытия позиции (Market или Limit)
+   */
+  private async handleOpenPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
+    const { type } = decision.parameters;
+
+    if (type === 'market') {
+      // Логика Задачи 7.2
+      await this._handleOpenMarketPosition(decision, validationResult);
+    } else if (type === 'limit') {
+      // Логика Задачи 7.2.1 (заглушка)
+      await this._handleOpenLimitPosition(decision, validationResult);
+    } else {
+      throw new Error(`[${decision.pair}] Неизвестный тип ордера в handleOpenPosition: ${type}`);
+    }
+  }
+
+  /**
+   * Реализация OPEN (Market) - Задача 7.2
+   * Немедленное открытие позиции через market ордер
+   */
+  private async _handleOpenMarketPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
+    const { pair, parameters, action } = decision;
+    const { stop_loss_price, take_profit_price, trailing_stop_config } = parameters;
+    const { roundedAmountCoin } = validationResult;
+
+    const side: 'buy' | 'sell' = action === 'OPEN_LONG' ? 'buy' : 'sell';
+    const oppositeSide: 'buy' | 'sell' = side === 'buy' ? 'sell' : 'buy';
+
+    this.logger.debug(
+      `[${pair}] Запуск _handleOpenMarketPosition. Side: ${side}, Amount: ${roundedAmountCoin.toString()}`,
+    );
+
+    // Критично: Вся операция выполняется в ОДНОЙ транзакции
+    await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+      // --- Шаг 1: Создание Market ордера ---
+      const marketOrder = await this.executionService.createOrderWithRetry(pair, 'market', side, roundedAmountCoin);
+
+      // Извлекаем РЕАЛЬНЫЕ данные исполнения
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const orderAny = marketOrder as any;
+      const realEntryPrice = orderAny.average || orderAny.price;
+      const realAmount = orderAny.filled || orderAny.amount;
+      const realFeeCost = orderAny.fee?.cost ?? new DecimalConstructor(0);
+      const realTimestamp = orderAny.timestamp ?? Date.now();
+
+      if (!realEntryPrice || !realAmount) {
+        throw new Error(
+          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Market ордер ${marketOrder.id} вернул 'null' price или 'null' amount.`,
+        );
+      }
+
+      this.logger.debug(
+        `[${pair}] Market ордер ${marketOrder.id} исполнен. Price: ${realEntryPrice.toString()}, Amount: ${realAmount.toString()}`,
+      );
+
+      // Конвертируем DecimalValue в Decimal для вычислений
+      const entryPriceDecimal = new DecimalConstructor(realEntryPrice.toString());
+      const amountDecimal = new DecimalConstructor(realAmount.toString());
+      const feeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
+
+      // --- Шаг 2: Создание SL/TP ордеров ---
+      let slOrder: IDecimalOrder | null = null;
+      let tpOrder: IDecimalOrder | null = null;
+
+      // Создаем SL
+      if (stop_loss_price !== null && stop_loss_price !== undefined) {
+        const slPriceDecimal = new DecimalConstructor(stop_loss_price.toString());
+        const slPriceParams = { stopPrice: slPriceDecimal.toNumber() };
+
+        slOrder = await this.executionService.createOrderWithRetry(
+          pair,
+          'stop_loss_limit',
+          oppositeSide,
+          amountDecimal,
+          slPriceDecimal,
+          slPriceParams,
+        );
+        this.logger.debug(`[${pair}] SL ордер ${slOrder.id} создан.`);
+      }
+
+      // Создаем TP
+      if (take_profit_price !== null && take_profit_price !== undefined) {
+        const tpPriceDecimal = new DecimalConstructor(take_profit_price.toString());
+
+        tpOrder = await this.executionService.createOrderWithRetry(
+          pair,
+          'limit',
+          oppositeSide,
+          amountDecimal,
+          tpPriceDecimal,
+        );
+        this.logger.debug(`[${pair}] TP ордер ${tpOrder.id} создан.`);
+      }
+
+      // --- Шаг 3: Сохранение Состояния в БД (Атомарно) ---
+
+      // 1. Сохранить Позицию
+      await client.query(
+        `INSERT INTO ActivePositions (
+          pair, side, amount, average_entry_price, total_fee_cost, stop_loss_price
+        ) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          pair,
+          action === 'OPEN_LONG' ? 'long' : 'short',
+          amountDecimal.toNumber(),
+          entryPriceDecimal.toNumber(),
+          feeCostDecimal.toNumber(),
+          stop_loss_price !== null && stop_loss_price !== undefined ? stop_loss_price : null,
+        ],
+      );
+
+      // 2. Сохранить Историю (вход)
+      // Для exchange_trade_id используем order.id + timestamp для уникальности
+      const exchangeTradeId = `${marketOrder.id}-${realTimestamp}`;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const feeCurrency = (orderAny.fee?.currency as string) || 'USDT';
+
+      await client.query(
+        `INSERT INTO TradeHistory (
+          timestamp, exchange_trade_id, exchange_order_id, pair, side, price, amount, fee_cost, fee_currency
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          new Date(realTimestamp),
+          exchangeTradeId,
+          marketOrder.id,
+          pair,
+          side,
+          entryPriceDecimal.toNumber(),
+          amountDecimal.toNumber(),
+          feeCostDecimal.toNumber(),
+          feeCurrency,
+        ],
+      );
+
+      // 3. Сохранить SL ордер
+      if (slOrder) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const slOrderAny = slOrder as any;
+        const slPrice = slOrderAny.price || slOrderAny.stopPrice || stop_loss_price;
+        const slPriceDecimal = new DecimalConstructor(slPrice.toString());
+
+        await client.query(
+          `INSERT INTO ActiveOrders (
+            exchange_order_id, pair, status, type, side, price, amount
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            slOrder.id,
+            pair,
+            slOrder.status || 'open',
+            'stop_loss_limit',
+            slOrder.side,
+            slPriceDecimal.toNumber(),
+            amountDecimal.toNumber(),
+          ],
+        );
+      }
+
+      // 4. Сохранить TP ордер
+      if (tpOrder) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tpOrderAny = tpOrder as any;
+        const tpPrice = tpOrderAny.price || take_profit_price;
+        const tpPriceDecimal = new DecimalConstructor(tpPrice.toString());
+
+        await client.query(
+          `INSERT INTO ActiveOrders (
+            exchange_order_id, pair, status, type, side, price, amount
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            tpOrder.id,
+            pair,
+            tpOrder.status || 'open',
+            'take_profit_limit',
+            tpOrder.side,
+            tpPriceDecimal.toNumber(),
+            amountDecimal.toNumber(),
+          ],
+        );
+      }
+
+      // 5. Сохранить TSL (если есть)
+      if (trailing_stop_config && slOrder) {
+        const tslConfigJson = JSON.stringify(trailing_stop_config);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const slOrderAny = slOrder as any;
+        const slPrice = slOrderAny.price || slOrderAny.stopPrice || stop_loss_price;
+        const slPriceDecimal = new DecimalConstructor(slPrice.toString());
+
+        await client.query(
+          `INSERT INTO TSL_State (
+            pair, current_stop_price, current_stop_order_id, price_seen, rule_config_json
+          ) VALUES ($1, $2, $3, $4, $5)`,
+          [
+            pair,
+            slPriceDecimal.toNumber(),
+            slOrder.id,
+            entryPriceDecimal.toNumber(), // Начальная "пиковая" цена = цена входа
+            tslConfigJson,
+          ],
+        );
+      }
+
+      this.logger.info(`[${pair}] Атомарная транзакция (OPEN Market) УСПЕШНА.`);
+    });
+  }
+
+  /**
+   * Заглушка для OPEN (Limit) - Задача 7.2.1
+   */
+  private async _handleOpenLimitPosition(
     decision: LLMDecision,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _validationResult: CalculatedAmounts,
   ): Promise<void> {
-    this.logger.debug(`[${decision.pair}] (STUB) Вызов handleOpenPosition...`);
-    // Логика Задачи 7.2 / 7.2.1 будет здесь
-    // e.g., this.databaseService.executeInTransaction(async (client) => { ... })
+    this.logger.debug(`[${decision.pair}] (STUB) Вызов _handleOpenLimitPosition...`);
+    // Логика Задачи 7.2.1 будет здесь
+    throw new Error(`[${decision.pair}] OPEN (Limit) еще не реализовано. См. Задачу 7.2.1`);
   }
 
   private async handleClosePosition(

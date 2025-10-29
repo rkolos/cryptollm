@@ -111,10 +111,7 @@ export class PriceTriggerHandler {
    * Приватный метод для поиска сработавшего price триггера
    * Чистая, синхронная функция, использующая decimal.js
    */
-  private _findPriceTrigger(
-    conditions: LLMTriggerCondition[],
-    currentPrice: DecimalValue,
-  ): LLMTriggerCondition | null {
+  private _findPriceTrigger(conditions: LLMTriggerCondition[], currentPrice: DecimalValue): LLMTriggerCondition | null {
     for (const condition of conditions) {
       // Ищем первый триггер типа 'price'
       if (condition.type !== 'price') {
@@ -157,4 +154,3 @@ export class PriceTriggerHandler {
     return null;
   }
 }
-

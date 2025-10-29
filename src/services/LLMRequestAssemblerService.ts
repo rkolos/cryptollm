@@ -205,10 +205,9 @@ export class LLMRequestAssemblerService {
     );
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const requestedDataJson =
-      triggerResult.rows.length > 0 && triggerResult.rows[0]
-        ? ((triggerResult.rows[0] as any).requested_data_json as string | null)
-        : null;
+    const row = triggerResult.rows.length > 0 ? triggerResult.rows[0] : null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const requestedDataJson = row ? ((row as any).requested_data_json as string | null) : null;
     const requestedData = this.parseRequestedData(requestedDataJson);
 
     // Обязательные базовые таймфреймы: 1h, 4h

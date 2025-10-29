@@ -4,4 +4,5 @@ dist/
 .env.local
 .env.*.local
 *.log
+logs/
 

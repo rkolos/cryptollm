@@ -1,0 +1,23 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": ["src/index.ts", "scripts/**/*.ts"],
+  "project": ["src/**/*.ts", "scripts/**/*.ts"],
+  "ignore": ["dist/**", "migrations/**", "node_modules/**"],
+  "ignoreDependencies": [
+    "@types/node",
+    "@types/pg",
+    "@typescript-eslint/eslint-plugin",
+    "@typescript-eslint/parser",
+    "eslint",
+    "eslint-config-prettier",
+    "prettier",
+    "ts-node",
+    "tsx",
+    "typescript",
+    "node-pg-migrate"
+  ],
+  "typescript": {
+    "config": "tsconfig.json"
+  }
+}
+

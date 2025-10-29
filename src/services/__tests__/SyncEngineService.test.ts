@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SyncEngineService } from '../SyncEngineService.js';
 import { ConfigService } from '../ConfigService.js';
-import { ExchangeRulesService } from '../ExchangeRulesService.js';
 import { MockDataFactory } from '../../__tests__/mocks/MockData.js';
 import {
   createMockExchangeService,
@@ -51,7 +50,9 @@ describe('SyncEngineService', () => {
   describe('reconcileStateForPair', () => {
     it('должен выполнить сверку состояния для пары', async () => {
       // Мокируем данные с биржи
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeService.fetchOpenOrders as any).mockResolvedValue([]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeService.fetchBalance as any).mockResolvedValue({
         USDT: {
           free: MockDataFactory.createDecimal(9000),
@@ -61,6 +62,7 @@ describe('SyncEngineService', () => {
       });
 
       // Мокируем данные из БД
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockDatabaseService.query as any).mockResolvedValue({ rows: [], rowCount: 0 });
 
       await syncEngineService.reconcileStateForPair('BTC/USDT');
@@ -72,7 +74,9 @@ describe('SyncEngineService', () => {
   describe('reconcileStateAll', () => {
     it('должен выполнить сверку для всех пар в watchlist', async () => {
       // Мокируем данные
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeService.fetchOpenOrders as any).mockResolvedValue([]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeService.fetchBalance as any).mockResolvedValue({
         USDT: {
           free: MockDataFactory.createDecimal(9000),
@@ -80,6 +84,7 @@ describe('SyncEngineService', () => {
           total: MockDataFactory.createDecimal(10000),
         },
       });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockDatabaseService.query as any).mockResolvedValue({ rows: [], rowCount: 0 });
 
       // Мокируем getWatchlist из ConfigService

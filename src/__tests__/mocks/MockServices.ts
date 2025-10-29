@@ -1,14 +1,9 @@
 import { vi } from 'vitest';
-import Decimal from 'decimal.js';
 import type { ExchangeRulesService } from '../../services/ExchangeRulesService.js';
 import type { DatabaseService } from '../../services/DatabaseService.js';
 import type { GuaranteedOrderExecutionService } from '../../services/GuaranteedOrderExecutionService.js';
-import type { IExchangeService, IDecimalOrder, DecimalValue } from '../../interfaces/IExchangeService.js';
-import type { IMarketRules } from '../../interfaces/IMarketRules.js';
+import type { IExchangeService, IDecimalOrder } from '../../interfaces/IExchangeService.js';
 import { MockDataFactory } from './MockData.js';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const DecimalConstructor = Decimal as any;
 
 /**
  * Мок для ExchangeRulesService
@@ -25,8 +20,10 @@ export function createMockExchangeRulesService(): ExchangeRulesService {
  * Мок для DatabaseService
  */
 export function createMockDatabaseService(): DatabaseService {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mockService = {
     query: vi.fn(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     executeInTransaction: vi.fn(async (callback: (client: any) => Promise<any>) => {
       const mockClient = {
         query: vi.fn(),

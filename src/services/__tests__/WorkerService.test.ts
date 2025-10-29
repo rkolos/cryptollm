@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { WorkerService } from '../WorkerService.js';
 import { ValidationError } from '../../errors/ValidationError.js';
 import { InsufficientFundsError } from '../../errors/ExchangeErrors.js';
-import ccxt from 'ccxt';
 import { MockDataFactory } from '../../__tests__/mocks/MockData.js';
 import {
   createMockExchangeRulesService,
@@ -87,11 +86,13 @@ describe('WorkerService', () => {
       });
 
       const validationError = new ValidationError('Test validation error');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockValidatorService.validateDecision as any).mockImplementation(() => {
         throw validationError;
       });
 
       // Мокируем _updateDecisionLog через executeInTransaction
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockDatabaseService.executeInTransaction as any).mockImplementation(async (callback: any) => {
         const mockClient = {
           query: vi.fn().mockResolvedValue({ rowCount: 1 }),
@@ -116,6 +117,7 @@ describe('WorkerService', () => {
 
     it('должен продолжить выполнение при успешной валидации', async () => {
       // ВАЖНО: Сбрасываем мок валидатора, чтобы убедиться, что предыдущий тест не влияет
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockValidatorService.validateDecision as any).mockReset();
 
       const decision = MockDataFactory.createLLMDecision({
@@ -137,9 +139,11 @@ describe('WorkerService', () => {
       };
 
       // Мокируем getRules для exchangeRulesService (вызывается в WorkerService.execute перед валидацией)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeRulesService.getRules as any).mockReturnValue(MockDataFactory.createMarketRules());
       // Мокируем validateDecision, чтобы она возвращала результат (не выбрасывала ошибку)
       // validateDecision НЕ async функция, поэтому используем mockReturnValue
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockValidatorService.validateDecision as any).mockReturnValue(validationResult);
 
       // Мокируем успешное создание ордера (вызывается несколько раз: market, SL, TP)
@@ -174,13 +178,19 @@ describe('WorkerService', () => {
       // Мокируем разные ответы для разных типов ордеров
       let callCount = 0;
       // ВАЖНО: Сбрасываем мок перед настройкой и устанавливаем новую реализацию
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExecutionService.createOrderWithRetry as any).mockReset();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExecutionService.createOrderWithRetry as any).mockImplementation(async (
         _pair: string,
         type: string,
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         _side: string,
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
         _amount: any,
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
         _price?: any,
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
         _params?: any,
       ) => {
         callCount++;
@@ -192,8 +202,10 @@ describe('WorkerService', () => {
       });
 
       // Мокируем query для _updateDecisionLog (вызывается в начале и в конце)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockDatabaseService.query as any).mockResolvedValue({ rowCount: 1 });
       // Мокируем успешную транзакцию БД
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockDatabaseService.executeInTransaction as any).mockImplementation(async (callback: any) => {
         const mockClient = {
           query: vi.fn().mockResolvedValue({ rowCount: 1 }),
@@ -243,20 +255,27 @@ describe('WorkerService', () => {
       };
 
       // Мокируем getRules для exchangeRulesService
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeRulesService.getRules as any).mockReturnValue(MockDataFactory.createMarketRules());
       // Мокируем validateDecision, чтобы она возвращала результат
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockValidatorService.validateDecision as any).mockReturnValue(validationResult);
 
       // Мокируем ошибку InsufficientFunds при создании market ордера
       const insufficientFundsError = new InsufficientFundsError('Insufficient funds');
-      // Мокируем первый вызов (market) с ошибкой
-      // Важно: mockRejectedValue создает promise, который отклоняется
-      (mockExecutionService.createOrderWithRetry as any).mockImplementation(() => {
-        return Promise.reject(insufficientFundsError);
+      // ВАЖНО: Сбрасываем мок перед настройкой
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockExecutionService.createOrderWithRetry as any).mockReset();
+      // Мокируем первый вызов (market) с ошибкой - используем async функцию, которая выбрасывает ошибку
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockExecutionService.createOrderWithRetry as any).mockImplementation(async () => {
+        throw insufficientFundsError;
       });
 
       // Мокируем _updateDecisionLog (вызывается несколько раз)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockDatabaseService.query as any).mockResolvedValue({ rowCount: 1 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockDatabaseService.executeInTransaction as any).mockImplementation(async (callback: any) => {
         const mockClient = {
           query: vi.fn().mockResolvedValue({ rowCount: 1 }),

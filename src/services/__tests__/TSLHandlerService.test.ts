@@ -100,6 +100,7 @@ describe('TSLHandlerService', () => {
 
     it('не должен обрабатывать тикер если нет TSL правила для пары', () => {
       // Обновляем мок, чтобы не было TSL правила
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockAccountStateService.getAccountState as any).mockReturnValue({
         total_portfolio_value_usdt: MockDataFactory.createDecimal(10000),
         available_quote_balance: MockDataFactory.createDecimal(9000),
@@ -142,6 +143,7 @@ describe('TSLHandlerService', () => {
         },
       };
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockAccountStateService.getAccountState as any).mockReturnValue({
         total_portfolio_value_usdt: MockDataFactory.createDecimal(10000),
         available_quote_balance: MockDataFactory.createDecimal(9000),

@@ -8,8 +8,10 @@ describe('ConfigService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Очищаем instance для каждого теста
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (ConfigService as any).instance = undefined;
     process.env = { ...originalEnv };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.exit = vi.fn() as any;
   });
 
@@ -84,6 +86,7 @@ describe('ConfigService', () => {
 
   describe('getInstance', () => {
     it('должен выбросить ошибку если конфигурация не загружена', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (ConfigService as any).instance = undefined;
 
       expect(() => {

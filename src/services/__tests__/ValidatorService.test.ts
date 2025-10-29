@@ -48,6 +48,7 @@ describe('ValidatorService', () => {
         action: 'OPEN_LONG',
         parameters: {
           type: 'market',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           stop_loss_price: null as any,
         },
       });
@@ -205,6 +206,7 @@ describe('ValidatorService', () => {
         action: 'OPEN_LONG',
         parameters: {
           type: 'limit',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           price: null as any,
           stop_loss_price: MockDataFactory.createDecimal(48000),
         },
@@ -304,6 +306,7 @@ describe('ValidatorService', () => {
         action: 'CLOSE_POSITION',
         parameters: {
           type: 'market',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           amount_percent: null as any,
         },
       });
@@ -431,7 +434,9 @@ describe('ValidatorService', () => {
       // ValidatorService вызывает getRules для пары несколько раз через this.exchangeRulesService.getRules(pair)
       // validatorService хранит ссылку на mockExchangeRulesService (установлен в beforeEach)
       // Сбрасываем мок и устанавливаем mockReturnValue для множественных вызовов
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeRulesService.getRules as any).mockReset();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExchangeRulesService.getRules as any).mockReturnValue(exchangeRules);
 
       expect(() => {

@@ -3,7 +3,7 @@ import { ConfigService } from './ConfigService.js';
 import { DatabaseService } from './DatabaseService.js';
 import { EventBusService, type TradeExecutedEvent } from './EventBusService.js';
 import { LoggingService } from './LoggingService.js';
-import type { IExchangeService, IDecimalBalance } from '../interfaces/IExchangeService.js';
+import type { IExchangeService } from '../interfaces/IExchangeService.js';
 import type { AccountState, OpenPosition, AssetBalance, DecimalValue } from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
 
@@ -86,7 +86,10 @@ export class AccountStateService {
     if (value === null || value === undefined) {
       return new DecimalConstructor(0) as DecimalValue;
     }
-    if (value instanceof Decimal) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const valueAny = value as any;
+    if (valueAny && typeof valueAny.e === 'number' && typeof valueAny.toNumber === 'function') {
+      // Это уже DecimalValue
       return value as DecimalValue;
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

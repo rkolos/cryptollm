@@ -108,21 +108,21 @@ export class SyncEngineService {
       await this._reconcileOrders(
         pair,
         exchangeOrders, // Реальное состояние
-        (dbOrders.rows as unknown[]) as DbOrder[], // Наше состояние
+        dbOrders.rows as unknown[] as DbOrder[], // Наше состояние
       );
 
       // (STUB - Задача 5.1.1: "Судебная" сверка)
       await this._reconcilePositionsForensic(
         pair,
-        (dbPositions.rows as unknown[]) as DbPosition[], // Наши позиции
-        (dbOrders.rows as unknown[]) as DbOrder[], // Наши ордера
+        dbPositions.rows as unknown[] as DbPosition[], // Наши позиции
+        dbOrders.rows as unknown[] as DbOrder[], // Наши ордера
       );
 
       // (STUB - Задача 5.1.2: Исполнение OPEN_LIMIT)
       await this._reconcileOpenLimitOrders(
         pair,
         exchangeOrders, // Реальное состояние
-        (dbOrders.rows as unknown[]) as DbOrder[], // Наши ордера
+        dbOrders.rows as unknown[] as DbOrder[], // Наши ордера
       );
 
       this.logger.info(`[${pair}] (SyncEngine) Сверка [${pair}] ЗАВЕРШЕНА.`);
@@ -165,4 +165,3 @@ export class SyncEngineService {
     // Логика обработки частично/полностью исполненных OPEN_LIMIT будет здесь
   }
 }
-

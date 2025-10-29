@@ -534,6 +534,18 @@ export class SyncEngineService {
           }
         }
 
+        // Проверка деления на ноль (защита от edge cases)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const realAmountAny = realAmount as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const zero = new DecimalConstructor(0);
+        if (realAmountAny.isZero() || realAmountAny.eq(zero)) {
+          this.logger.error(
+            `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: realAmount равен нулю при расчете realEntryPrice. Пропускаем ордер ${dbOrder.exchange_order_id}.`,
+          );
+          continue; // Пропускаем этот ордер
+        }
+
         const realEntryPrice = realCost.div(realAmount);
 
         // Определяем сторону позиции

@@ -31,8 +31,8 @@ export class PairActorManagerService {
     // Если очереди нет, начинаем с уже разрешенного Promise.
     const previousTask = this.promiseQueues.get(pair) || Promise.resolve();
 
-    // 2. Создаем "обертку" для новой задачи.
-    const taskWrapper = async (): Promise<void> => {
+    // 2. Создаем обертку для задачи, которая ждет предыдущую и выполняет текущую
+    const taskWrapper = async (): Promise<T> => {
       try {
         // 3. (Критично) Ждем, пока предыдущая задача завершится.
         // Мы используем .catch(), чтобы дождаться завершения,
@@ -49,32 +49,34 @@ export class PairActorManagerService {
       // 4. (Критично) Только теперь, когда очередь дошла до нас,
       // мы *выполняем* саму задачу.
       // Ошибки (rejects) будут проброшены в `return` этого Promise.
-      await task();
+      return await task();
     };
 
-    // 5. Вызываем нашу "обертку" и сохраняем Promise<void> в Map
+    // 5. Вызываем нашу "обертку" и сохраняем Promise<T> в Map
     const nextTaskPromise = taskWrapper();
 
     // 6. (Критично) Обновляем "хвост" очереди в Map.
     // Мы прикрепляем .catch() к Promise *внутри* Map.
     // Это гарантирует, что если `nextTaskPromise` упадет,
     // это не "сломает" всю цепочку для будущих вызовов.
+    // ВАЖНО: Преобразуем Promise<T> в Promise<void> для Map
     this.promiseQueues.set(
       pair,
-      nextTaskPromise.catch(() => {
-        // Мы "глотаем" ошибку *только* для Promise, хранящегося в Map.
-        // Сам `nextTaskPromise` (возвращаемый ниже) по-прежнему
-        // будет содержать ошибку для вызывающей стороны.
-      }),
+      nextTaskPromise
+        .then(() => {
+          // Преобразуем в void для Map
+        })
+        .catch(() => {
+          // Мы "глотаем" ошибку *только* для Promise, хранящегося в Map.
+          // Сам `nextTaskPromise` (возвращаемый ниже) по-прежнему
+          // будет содержать ошибку для вызывающей стороны.
+        }),
     );
 
-    // 7. Выполняем задачу отдельно для получения результата.
+    // 7. Возвращаем Promise<T> вызывающей стороне
     // Вызывающая сторона (e.g., TSLHandler) получит либо `resolve(T)`,
     // либо `reject(error)` от `task()`.
-    await previousTask.catch(() => {
-      // Игнорируем ошибку предыдущей задачи
-    });
-    return await task();
+    return nextTaskPromise;
   }
 
   /**

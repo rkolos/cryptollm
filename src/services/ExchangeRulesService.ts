@@ -5,9 +5,6 @@ import type { IExchangeService } from '../interfaces/IExchangeService.js';
 import type { IMarketRules } from '../interfaces/IMarketRules.js';
 import type winston from 'winston';
 
-const decimalInstance = new (Decimal as any)(0);
-type DecimalValue = typeof decimalInstance;
-
 export class ExchangeRulesService {
   private static instance: ExchangeRulesService | undefined;
   private readonly rulesCache: Map<string, IMarketRules> = new Map();

@@ -1,0 +1,40 @@
+import Decimal from 'decimal.js';
+import type { LLMDecision } from './ILLMTypes.js';
+import type { IMarketRules } from './IMarketRules.js';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const decimalInstance = new (Decimal as any)(0);
+export type DecimalValue = typeof decimalInstance;
+
+export interface OpenPosition {
+  pair: string;
+  side: 'long' | 'short';
+  amount: DecimalValue;
+  average_entry_price: DecimalValue;
+  stop_loss_price: DecimalValue | null;
+}
+
+export interface AccountState {
+  total_portfolio_value_usdt: DecimalValue;
+  available_quote_balance: DecimalValue;
+  open_positions: OpenPosition[];
+  open_orders: unknown[];
+}
+
+export interface MarketData {
+  pair: string;
+  current_price: DecimalValue;
+}
+
+export interface StrategyContext {
+  risk_rules: {
+    default_risk_per_trade_percent: number;
+    max_allowed_risk_per_trade_percent: number;
+    max_total_portfolio_risk_percent: number;
+    desired_risk_reward_ratio: number;
+  };
+}
+
+export interface SanityCheckResult {
+  entryPrice: DecimalValue;
+}

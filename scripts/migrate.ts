@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { ConfigService } from '../src/services/ConfigService.js';
-import { run } from 'node-pg-migrate';
+import { runner } from 'node-pg-migrate';
 
 async function main() {
   ConfigService.load();
@@ -16,7 +16,7 @@ async function main() {
   const databaseUrl = `postgresql://${dbConfig.user}:${dbConfig.password}@${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`;
 
   try {
-    await run({
+    await runner({
       databaseUrl,
       dir: 'migrations',
       direction: direction as 'up' | 'down',

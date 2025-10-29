@@ -258,7 +258,11 @@ export class LLMRequestAssemblerService {
     if (!currentPrice) {
       // Fallback: получаем цену из последнего OHLCV
       const firstTimeframeOhlcv = ohlcvResults[0];
-      const lastCandle = firstTimeframeOhlcv?.[firstTimeframeOhlcv.length - 1];
+      // Проверка на существование и непустоту массива
+      const lastCandle =
+        firstTimeframeOhlcv && firstTimeframeOhlcv.length > 0
+          ? firstTimeframeOhlcv[firstTimeframeOhlcv.length - 1]
+          : null;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       finalCurrentPrice = lastCandle?.close || (new DecimalConstructor(0) as DecimalValue);
     } else {

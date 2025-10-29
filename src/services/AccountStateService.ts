@@ -4,7 +4,15 @@ import { DatabaseService } from './DatabaseService.js';
 import { EventBusService, type TradeExecutedEvent } from './EventBusService.js';
 import { LoggingService } from './LoggingService.js';
 import type { IExchangeService } from '../interfaces/IExchangeService.js';
-import type { AccountState, OpenPosition, AssetBalance, DecimalValue } from '../interfaces/IValidatorTypes.js';
+import type {
+  AccountState,
+  OpenPosition,
+  AssetBalance,
+  DecimalValue,
+  TSLRule,
+  TSLState,
+  TSLRuleConfig,
+} from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -48,6 +56,7 @@ export class AccountStateService {
     assets: [],
     open_positions: [],
     open_orders: [],
+    tslRules: new Map<string, TSLRule>(),
   };
   private refreshPromise: Promise<void> | null = null;
 
@@ -126,10 +135,11 @@ export class AccountStateService {
         this.logger.debug('Refreshing account state...');
 
         // Параллельный запрос данных из всех источников
-        const [balance, dbPositionsResult, dbOrdersResult] = await Promise.all([
+        const [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult] = await Promise.all([
           this.exchangeService.fetchBalance(),
           this.databaseService.query('SELECT * FROM ActivePositions'),
           this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
+          this.databaseService.query('SELECT * FROM TSL_State'),
         ]);
 
         // Парсинг баланса
@@ -206,6 +216,46 @@ export class AccountStateService {
         // Для V1 используем total баланс quoteCurrency как общий показатель
         const totalPortfolioValueUsdt = totalQuoteBalance;
 
+        // Парсинг TSL_State из БД
+        const tslRulesMap = new Map<string, TSLRule>();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tslRows = dbTslStateResult.rows as any[];
+        for (const row of tslRows) {
+          const pair = row.pair as string;
+          // Находим соответствующую позицию
+          const position = openPositions.find((pos) => pos.pair === pair);
+          if (!position) {
+            this.logger.warn(`TSL_State для пары ${pair} существует, но позиция не найдена. Пропускаем.`);
+            continue;
+          }
+
+          // Парсим rule_config_json
+          let ruleConfig: TSLRuleConfig;
+          try {
+            ruleConfig = JSON.parse(row.rule_config_json) as TSLRuleConfig;
+          } catch (error) {
+            this.logger.error(`Ошибка парсинга rule_config_json для пары ${pair}:`, error);
+            continue;
+          }
+
+          // Формируем TSLState
+          const tslState: TSLState = {
+            currentStopPrice: this.toDecimal(row.current_stop_price),
+            currentStopOrderId: row.current_stop_order_id as string,
+            priceSeen: this.toDecimal(row.price_seen),
+          };
+
+          // Формируем TSLRule
+          const tslRule: TSLRule = {
+            pair,
+            position,
+            state: tslState,
+            rule: ruleConfig,
+          };
+
+          tslRulesMap.set(pair, tslRule);
+        }
+
         // Обновление кэша
         this.accountStateCache = {
           total_portfolio_value_usdt: totalPortfolioValueUsdt,
@@ -213,10 +263,11 @@ export class AccountStateService {
           assets,
           open_positions: openPositions,
           open_orders: openOrders,
+          tslRules: tslRulesMap,
         };
 
         this.logger.info(
-          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}`,
+          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}, tslRules=${tslRulesMap.size}`,
         );
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);

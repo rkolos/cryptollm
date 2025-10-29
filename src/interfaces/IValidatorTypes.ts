@@ -18,12 +18,31 @@ export interface AssetBalance {
   available: DecimalValue;
 }
 
+export interface TSLRuleConfig {
+  type: 'percentage';
+  distance: number; // Процент (e.g., 2.5)
+}
+
+export interface TSLState {
+  currentStopPrice: DecimalValue;
+  currentStopOrderId: string;
+  priceSeen: DecimalValue; // highestPrice для long, lowestPrice для short
+}
+
+export interface TSLRule {
+  pair: string;
+  position: OpenPosition;
+  state: TSLState;
+  rule: TSLRuleConfig;
+}
+
 export interface AccountState {
   total_portfolio_value_usdt: DecimalValue;
   available_quote_balance: DecimalValue;
   assets: AssetBalance[];
   open_positions: OpenPosition[];
   open_orders: unknown[];
+  tslRules: Map<string, TSLRule>;
 }
 
 export interface MarketData {

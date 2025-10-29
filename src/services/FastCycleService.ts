@@ -5,7 +5,7 @@ import type { IExchangeService, IDecimalTicker } from '../interfaces/IExchangeSe
 import type winston from 'winston';
 
 /**
- * Интерфейс для TSLHandlerService (будет реализован в задаче 5.4)
+ * Интерфейс для TSLHandlerService (реализован в задаче 5.4)
  */
 export interface ITSLHandlerService {
   handleTicker(ticker: IDecimalTicker): void;

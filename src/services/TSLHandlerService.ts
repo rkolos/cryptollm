@@ -5,7 +5,7 @@ import { PairActorManagerService } from './PairActorManagerService.js';
 import { GuaranteedOrderExecutionService } from './GuaranteedOrderExecutionService.js';
 import { DatabaseService } from './DatabaseService.js';
 import type { IDecimalTicker, DecimalValue } from '../interfaces/IExchangeService.js';
-import type { TSLRule, TSLState } from '../interfaces/IValidatorTypes.js';
+import type { TSLRule } from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
 import type { PoolClient } from 'pg';
 
@@ -185,10 +185,9 @@ export class TSLHandlerService {
       // Шаг 3: Атомарное обновление БД (критично)
       await this.databaseService.executeInTransaction(async (client: PoolClient) => {
         // 1. Обновить TSL_State
-        const priceSeenField = position.side === 'long' ? 'price_seen' : 'price_seen'; // Для V1 используем одно поле
         await client.query(
           `UPDATE TSL_State 
-           SET current_stop_price = $1, current_stop_order_id = $2, price_seen = $3, updated_at = NOW()
+           SET current_stop_price = $1, current_stop_limit_id = $2, price_seen = $3, updated_at = NOW()
            WHERE pair = $4`,
           [newStopPrice.toString(), newSlOrder.id, currentPrice.toString(), pair],
         );

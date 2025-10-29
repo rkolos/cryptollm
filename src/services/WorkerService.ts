@@ -614,9 +614,9 @@ export class WorkerService {
     // Критично: Вся операция выполняется в ОДНОЙ транзакции
     await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
       // --- Шаг 1: Получить Позицию из БД (и заблокировать строку) ---
-      // Мы должны получить точное кол-во и сторону ПЕРЕД закрытием
+      // Мы должны получить точное кол-во, сторону, цену входа и комиссию ПЕРЕД закрытием
       const positionResult = await client.query(
-        `SELECT amount, side, average_entry_price FROM ActivePositions WHERE pair = $1 FOR UPDATE`,
+        `SELECT amount, side, average_entry_price, total_fee_cost FROM ActivePositions WHERE pair = $1 FOR UPDATE`,
         [pair],
       );
 
@@ -673,7 +673,49 @@ export class WorkerService {
       // Конвертируем DecimalValue в Decimal для вычислений
       const closePriceDecimal = new DecimalConstructor(realClosePrice.toString());
       const amountDecimal = new DecimalConstructor(realAmount.toString());
-      const feeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
+      const closeFeeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
+
+      // --- Расчет Realized PnL ---
+      const entryPriceDecimal = new DecimalConstructor(currentPosition.average_entry_price.toString());
+      const entryFeeCostDecimal = new DecimalConstructor(currentPosition.total_fee_cost?.toString() || '0');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entryFeeDecimal = entryFeeCostDecimal as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const closeFeeDecimal = closeFeeCostDecimal as any;
+
+      let realizedPnlUsd: DecimalValue;
+      if (positionSide === 'long') {
+        // Для LONG: PnL = (close_price - entry_price) * amount - entry_fee - close_fee
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const priceDiffDecimal = (closePriceDecimal as any).minus(entryPriceDecimal);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const amountDecimalForCalc = amountDecimal as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const grossPnl = priceDiffDecimal.mul(amountDecimalForCalc);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const totalFees = (entryFeeDecimal as any).plus(closeFeeDecimal);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        realizedPnlUsd = grossPnl.minus(totalFees) as DecimalValue;
+      } else {
+        // Для SHORT: PnL = (entry_price - close_price) * amount - entry_fee - close_fee
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const priceDiffDecimal = (entryPriceDecimal as any).minus(closePriceDecimal);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const amountDecimalForCalc = amountDecimal as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const grossPnl = priceDiffDecimal.mul(amountDecimalForCalc);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const totalFees = (entryFeeDecimal as any).plus(closeFeeDecimal);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        realizedPnlUsd = grossPnl.minus(totalFees) as DecimalValue;
+      }
+
+      // Логируем PnL
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const realizedPnlDecimal = realizedPnlUsd as any;
+      this.logger.info(
+        `[${pair}] Realized PnL: ${realizedPnlDecimal.toFixed(2)} USDT (Entry: ${entryPriceDecimal.toString()}, Close: ${closePriceDecimal.toString()}, Amount: ${amountDecimal.toString()})`,
+      );
 
       // --- Шаг 4: Атомарная Очистка БД ---
 
@@ -686,7 +728,7 @@ export class WorkerService {
       // 3. Удалить ВСЕ связанные TSL
       await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
 
-      // 4. Сохранить Историю (выход)
+      // 4. Сохранить Историю (выход) с calculated PnL
       // Для exchange_trade_id используем order.id + timestamp для уникальности
       const exchangeTradeId = `${closeMarketOrder.id}-${realTimestamp}`;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -694,8 +736,8 @@ export class WorkerService {
 
       await client.query(
         `INSERT INTO TradeHistory (
-          timestamp, exchange_trade_id, exchange_order_id, pair, side, price, amount, fee_cost, fee_currency
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          timestamp, exchange_trade_id, exchange_order_id, pair, side, price, amount, fee_cost, fee_currency, realized_pnl_usd
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           new Date(realTimestamp),
           exchangeTradeId,
@@ -704,8 +746,9 @@ export class WorkerService {
           closeSide, // Сторона ордера ('buy' или 'sell')
           closePriceDecimal.toNumber(),
           amountDecimal.toNumber(),
-          feeCostDecimal.toNumber(),
+          closeFeeCostDecimal.toNumber(),
           feeCurrency,
+          realizedPnlDecimal.toNumber(),
         ],
       );
 

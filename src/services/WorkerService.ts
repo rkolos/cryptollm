@@ -930,12 +930,76 @@ export class WorkerService {
     });
   }
 
+  /**
+   * Реализация CANCEL_ORDERS - Задача 7.5
+   * Отмена ордеров (limit, SL) без закрытия позиции
+   */
   private async handleCancelOrders(
     decision: LLMDecision,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _validationResult: CalculatedAmounts,
   ): Promise<void> {
-    this.logger.debug(`[${decision.pair}] (STUB) Вызов handleCancelOrders...`);
-    // Логика Задачи 7.5 будет здесь
+    const { pair, parameters } = decision;
+    const orderIdToCancel = parameters.order_id;
+
+    this.logger.debug(`[${pair}] Запуск handleCancelOrders...`);
+
+    // Критично: Вся операция выполняется в ОДНОЙ транзакции
+    await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+      if (orderIdToCancel) {
+        // --- Сценарий A: Отмена КОНКРЕТНОГО ордера ---
+        this.logger.debug(`[${pair}] Отмена конкретного ордера: ${orderIdToCancel}`);
+
+        // Шаг 1: Отмена на Бирже
+        await this.executionService.cancelOrderWithRetry(orderIdToCancel, pair);
+
+        // Шаг 2: Атомарная очистка БД
+
+        // 2.1. Удаляем из ActiveOrders
+        await client.query(`DELETE FROM ActiveOrders WHERE exchange_order_id = $1`, [orderIdToCancel]);
+
+        // 2.2. (Критично) Удаляем связанный TSL, если он был
+        // Если мы отменили SL, TSL больше недействителен
+        await client.query(`DELETE FROM TSL_State WHERE current_stop_order_id = $1`, [orderIdToCancel]);
+      } else {
+        // --- Сценарий Б: Отмена ВСЕХ ордеров по паре ---
+        this.logger.debug(`[${pair}] Отмена ВСЕХ ордеров...`);
+
+        // Шаг 1: Получить ВСЕ ID ордеров из БД
+        // Мы должны сделать это *до* отмены, чтобы получить полный список
+        const ordersResult = await client.query(
+          `SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1 FOR UPDATE`,
+          [pair],
+        );
+        const orderIdsToCancel: string[] = ordersResult.rows.map((r) => r.exchange_order_id as string);
+
+        if (orderIdsToCancel.length === 0) {
+          this.logger.warn(`[${pair}] Нет ордеров для отмены.`);
+          return;
+        }
+
+        // Шаг 2: Отмена ВСЕХ ордеров на Бирже
+        for (const orderId of orderIdsToCancel) {
+          // Отменяем по одному, используя Guaranteed service
+          try {
+            await this.executionService.cancelOrderWithRetry(orderId, pair);
+          } catch (error) {
+            // Логируем ошибку, но продолжаем отмену остальных ордеров
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[${pair}] Не удалось отменить ордер ${orderId}: ${errorMessage}`);
+          }
+        }
+
+        // Шаг 3: Атомарная очистка БД
+
+        // 3.1. Удаляем ВСЕ ордера по паре
+        await client.query(`DELETE FROM ActiveOrders WHERE pair = $1`, [pair]);
+
+        // 3.2. Удаляем ВСЕ TSL по паре
+        await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
+      }
+
+      this.logger.info(`[${pair}] Атомарная транзакция (CANCEL Orders) УСПЕШНА.`);
+    });
   }
 }

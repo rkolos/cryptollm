@@ -297,6 +297,73 @@ export class ValidatorService {
     };
   }
 
+  private _validatePortfolioRisk(
+    usdAtRisk: DecimalValue,
+    accountState: AccountState,
+    strategyContext: StrategyContext,
+  ): void {
+    const riskRules = strategyContext.risk_rules;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const totalValueDecimal = accountState.total_portfolio_value_usdt as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const zero = new DecimalConstructor(0);
+
+    if (totalValueDecimal.isZero() || totalValueDecimal.eq(zero)) {
+      this.logger.warn('Total portfolio value is 0. Skipping total portfolio risk check.');
+      return;
+    }
+
+    // Суммируем риск существующих позиций
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let totalCurrentRiskUsd = new DecimalConstructor(0) as any;
+
+    for (const pos of accountState.open_positions) {
+      if (pos.average_entry_price && pos.stop_loss_price && pos.amount) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const entryDecimal = pos.average_entry_price as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const stopDecimal = pos.stop_loss_price as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const amountDecimal = pos.amount as any;
+
+        // pos_risk_usd = abs(entry - stop) * amount
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const posRiskUsd = entryDecimal.sub(stopDecimal).abs().mul(amountDecimal) as any;
+        totalCurrentRiskUsd = totalCurrentRiskUsd.add(posRiskUsd);
+      }
+    }
+
+    // Рассчитываем % риска существующих позиций
+    // total_current_risk_percent = (totalCurrentRiskUsd / total_value) * 100
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const hundred = new DecimalConstructor(100);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const totalCurrentRiskPercent = totalCurrentRiskUsd.div(totalValueDecimal).mul(hundred) as any;
+
+    // Рассчитываем % риска новой сделки
+    // new_trade_risk_percent = (usd_at_risk / total_value) * 100
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const usdAtRiskDecimal = usdAtRisk as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const newTradeRiskPercent = usdAtRiskDecimal.div(totalValueDecimal).mul(hundred) as any;
+
+    // Сравниваем сумму с лимитом
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const maxTotalRiskPercent = this.toDecimal(riskRules.max_total_portfolio_risk_percent) as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const projectedTotalRiskPercent = totalCurrentRiskPercent.add(newTradeRiskPercent) as any;
+
+    this.logger.debug(
+      `Portfolio Risk Check: Current ${totalCurrentRiskPercent.toFixed(2)}% + New ${newTradeRiskPercent.toFixed(2)}% = Projected ${projectedTotalRiskPercent.toFixed(2)}% (Limit: ${maxTotalRiskPercent.toFixed(2)}%)`,
+    );
+
+    if (projectedTotalRiskPercent.gt(maxTotalRiskPercent)) {
+      throw new ValidationError(
+        `New trade (risk ${newTradeRiskPercent.toFixed(2)}%) + Open positions (risk ${totalCurrentRiskPercent.toFixed(2)}%) = ${projectedTotalRiskPercent.toFixed(2)}%. This exceeds max_total_portfolio_risk_percent (${maxTotalRiskPercent.toFixed(2)}%).`,
+      );
+    }
+  }
+
   public validateDecision(
     decision: LLMDecision,
     accountState: AccountState,
@@ -325,6 +392,10 @@ export class ValidatorService {
         strategyContext,
         sanityResult.entryPrice,
       );
+
+      // Уровень 3: Portfolio Risk Check
+      this._validatePortfolioRisk(calculatedAmounts.usdAtRisk, accountState, strategyContext);
+
       return {
         ...sanityResult,
         ...calculatedAmounts,

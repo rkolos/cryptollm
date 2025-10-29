@@ -663,16 +663,93 @@ export class WorkerService {
   }
 
   /**
-   * Заглушка для CLOSE_POSITION (Limit) - Задача 7.3.1
+   * Реализация CLOSE_POSITION (Limit) - Задача 7.3.1
+   * Отложенное закрытие позиции через limit ордер (Take Profit)
    */
   private async _handleCloseLimitPosition(
     decision: LLMDecision,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _validationResult: CalculatedAmounts,
   ): Promise<void> {
-    this.logger.debug(`[${decision.pair}] (STUB) Вызов _handleCloseLimitPosition...`);
-    // Логика Задачи 7.3.1 будет здесь
-    throw new Error(`[${decision.pair}] CLOSE_POSITION (Limit) еще не реализовано. См. Задачу 7.3.1`);
+    const { pair, parameters } = decision;
+    const { price: limitPrice } = parameters;
+
+    // Проверка наличия цены для limit ордера
+    if (!limitPrice) {
+      throw new Error(`[${pair}] (ОШИБКА ВАЛИДАТОРА) CLOSE_POSITION (Limit) требует параметр 'price'.`);
+    }
+
+    this.logger.debug(`[${pair}] Запуск _handleCloseLimitPosition. Price: ${limitPrice}`);
+
+    // Критично: Вся операция выполняется в ОДНОЙ транзакции
+    await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+      // --- Шаг 1: Получить Позицию из БД (и заблокировать строку) ---
+      const positionResult = await client.query(`SELECT amount, side FROM ActivePositions WHERE pair = $1 FOR UPDATE`, [
+        pair,
+      ]);
+
+      if (positionResult.rowCount === 0) {
+        this.logger.warn(`[${pair}] Попытка установить Limit Close для позиции, которая не существует в БД.`);
+        throw new Error(`[${pair}] (ОШИБКА СИНХРОНИЗАЦИИ) Позиция для Limit Close не найдена в ActivePositions.`);
+      }
+
+      const currentPosition = positionResult.rows[0];
+      const positionAmountDecimal = new DecimalConstructor(currentPosition.amount.toString());
+      const positionSide = currentPosition.side as 'long' | 'short';
+
+      // Определяем ордер на закрытие
+      const closeSide: 'buy' | 'sell' = positionSide === 'long' ? 'sell' : 'buy';
+
+      this.logger.debug(
+        `[${pair}] Установка Limit Close (TP) для ${positionSide} позиции. Объем: ${positionAmountDecimal.toString()}, Сторона: ${closeSide}.`,
+      );
+
+      // --- Шаг 2: Создание Limit ордера на Закрытие ---
+      // НЕ ЖДАТЬ ИСПОЛНЕНИЯ - ордер остается открытым
+      const limitPriceDecimal = new DecimalConstructor(limitPrice.toString());
+
+      const limitCloseOrder = await this.executionService.createOrderWithRetry(
+        pair,
+        'limit',
+        closeSide,
+        positionAmountDecimal,
+        limitPriceDecimal,
+      );
+
+      this.logger.debug(
+        `[${pair}] Limit ордер (Закрытие) ${limitCloseOrder.id} создан (status: ${limitCloseOrder.status || 'open'}).`,
+      );
+
+      // --- Шаг 3: Атомарная Запись Ордера в БД ---
+      // Мы НЕ удаляем позицию, т.к. ордер еще не исполнен
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const orderAny = limitCloseOrder as any;
+      const orderPrice = orderAny.price || limitPriceDecimal;
+      const orderPriceDecimal = new DecimalConstructor(orderPrice.toString());
+
+      await client.query(
+        `INSERT INTO ActiveOrders (
+          exchange_order_id, pair, status, type, side, price, amount
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (exchange_order_id) DO UPDATE SET
+          status = excluded.status,
+          price = excluded.price,
+          amount = excluded.amount`,
+        [
+          limitCloseOrder.id,
+          pair,
+          limitCloseOrder.status || 'open',
+          'limit_close', // Наш внутренний тип
+          closeSide,
+          orderPriceDecimal.toNumber(),
+          positionAmountDecimal.toNumber(),
+        ],
+      );
+
+      this.logger.info(
+        `[${pair}] Атомарная транзакция (CLOSE Limit) УСПЕШНА. Ордер ${limitCloseOrder.id} сохранен как limit_close.`,
+      );
+    });
   }
 
   private async handleModifyPosition(

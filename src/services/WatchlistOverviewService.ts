@@ -101,6 +101,10 @@ export class WatchlistOverviewService {
         const result = results[i];
         const pair = pairsToProcess[i];
 
+        if (!result || !pair) {
+          continue;
+        }
+
         if (result.status === 'fulfilled') {
           overview.push(result.value);
         } else {

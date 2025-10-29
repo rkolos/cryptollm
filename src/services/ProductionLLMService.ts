@@ -60,16 +60,19 @@ export class ProductionLLMService implements ILLMService {
     try {
       const responseData = await this.executeRequestWithRetry(payload);
 
-      let dataToValidate = responseData;
+      let dataToValidate: unknown = responseData;
 
-      if (responseData.choices && responseData.choices[0]?.message?.content) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseDataTyped = responseData as any;
+
+      if (responseDataTyped.choices && responseDataTyped.choices[0]?.message?.content) {
         try {
-          const content = responseData.choices[0].message.content;
+          const content = responseDataTyped.choices[0].message.content;
           const jsonString = content.replace(/```json\s*|```\s*/g, '').trim();
           dataToValidate = JSON.parse(jsonString);
         } catch (jsonParseError) {
           this.logger.error('Failed to parse JSON from choices.message.content', {
-            content: responseData.choices[0].message.content,
+            content: responseDataTyped.choices[0].message.content,
           });
           throw new LLMResponseFormatError('LLM response content was not valid JSON.', jsonParseError, responseData);
         }
@@ -79,10 +82,10 @@ export class ProductionLLMService implements ILLMService {
 
       if (!parseResult.success) {
         this.logger.error('LLM Response validation FAILED.', {
-          errors: parseResult.error.errors,
+          errors: parseResult.error.issues,
           rawData: dataToValidate,
         });
-        throw new LLMResponseFormatError('LLM response format is invalid.', parseResult.error.errors, dataToValidate);
+        throw new LLMResponseFormatError('LLM response format is invalid.', parseResult.error.issues, dataToValidate);
       }
 
       this.logger.info(`Received and validated LLM response for [${payload.triggered_pair}].`);

@@ -149,6 +149,11 @@ async function main(): Promise<void> {
       macroContextService,
     );
 
+    // Инициализация LLMRequestAssemblerService (загрузка промптов)
+    logger.info('Loading LLM prompts...');
+    await llmRequestAssemblerService.initialize();
+    logger.info('LLM prompts loaded successfully.');
+
     // ValidatorService для WorkerService
     const validatorService = ValidatorService.getInstance(exchangeRulesService);
 

@@ -43,9 +43,10 @@ describe('WorkerService', () => {
       emitTradeExecuted: vi.fn(),
     } as unknown as EventBusService;
 
-    mockNotificationService = {
-      sendAlert: vi.fn(),
-    } as unknown as NotificationService;
+        mockNotificationService = {
+          sendAlert: vi.fn(),
+          sendTradingSummary: vi.fn(),
+        } as unknown as NotificationService;
 
     mockGlobalStateService = {
       pause: vi.fn(),

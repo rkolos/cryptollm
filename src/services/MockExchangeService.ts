@@ -89,7 +89,9 @@ export class MockExchangeService implements IExchangeService {
     const precision = rules.precision.amount;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const precisionDecimal = precision as any;
-    const multiplier = new DecimalConstructor(10).pow(precisionDecimal.e || 0);
+    // precision.e отрицательное для малых чисел (например, -8 для 0.00000001), поэтому берем abs
+    const precisionE = precisionDecimal.e !== undefined ? Math.abs(precisionDecimal.e) : 0;
+    const multiplier = new DecimalConstructor(10).pow(precisionE);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const amountDecimal = amount as any;
     const rounded = amountDecimal.mul(multiplier).floor().div(multiplier);
@@ -101,7 +103,9 @@ export class MockExchangeService implements IExchangeService {
     const precision = rules.precision.price;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const precisionDecimal = precision as any;
-    const multiplier = new DecimalConstructor(10).pow(precisionDecimal.e || 0);
+    // precision.e отрицательное для малых чисел (например, -2 для 0.01), поэтому берем abs
+    const precisionE = precisionDecimal.e !== undefined ? Math.abs(precisionDecimal.e) : 0;
+    const multiplier = new DecimalConstructor(10).pow(precisionE);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const priceDecimal = price as any;
     const rounded = priceDecimal.mul(multiplier).floor().div(multiplier);

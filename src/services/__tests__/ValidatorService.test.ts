@@ -118,9 +118,11 @@ describe('ValidatorService', () => {
       });
       const exchangeRules = MockDataFactory.createMarketRules();
 
+      // При SL = Entry для LONG сначала сработает проверка "SL must be strictly less than entry"
+      // которая происходит ДО проверки нулевой дистанции
       expect(() => {
         validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
-      }).toThrow(/Entry price and Stop Loss price are identical/);
+      }).toThrow(/Stop loss price.*must be strictly less than entry price.*for LONG/);
     });
   });
 
@@ -282,7 +284,9 @@ describe('ValidatorService', () => {
         },
       });
 
-      const accountState = MockDataFactory.createAccountState();
+      const accountState = MockDataFactory.createAccountState({
+        open_positions: [MockDataFactory.createOpenPosition({ pair: 'BTC/USDT' })],
+      });
       const strategyContext = MockDataFactory.createStrategyContext();
       const marketData = MockDataFactory.createMarketData();
       const exchangeRules = MockDataFactory.createMarketRules();
@@ -301,7 +305,9 @@ describe('ValidatorService', () => {
         },
       });
 
-      const accountState = MockDataFactory.createAccountState();
+      const accountState = MockDataFactory.createAccountState({
+        open_positions: [MockDataFactory.createOpenPosition({ pair: 'BTC/USDT' })],
+      });
       const strategyContext = MockDataFactory.createStrategyContext();
       const marketData = MockDataFactory.createMarketData();
       const exchangeRules = MockDataFactory.createMarketRules();
@@ -320,7 +326,9 @@ describe('ValidatorService', () => {
         },
       });
 
-      const accountState = MockDataFactory.createAccountState();
+      const accountState = MockDataFactory.createAccountState({
+        open_positions: [MockDataFactory.createOpenPosition({ pair: 'BTC/USDT' })],
+      });
       const strategyContext = MockDataFactory.createStrategyContext();
       const marketData = MockDataFactory.createMarketData();
       const exchangeRules = MockDataFactory.createMarketRules();
@@ -390,20 +398,27 @@ describe('ValidatorService', () => {
         action: 'OPEN_LONG',
         parameters: {
           type: 'market',
-          stop_loss_price: MockDataFactory.createDecimal(49999), // Очень маленькая дистанция
-          risk_percent: MockDataFactory.createDecimal(0.01), // Очень маленький риск
+          stop_loss_price: MockDataFactory.createDecimal(49950), // Дистанция 50
+          risk_percent: MockDataFactory.createDecimal(0.05), // 0.05% риска = 5 USDT
         },
       });
 
       const accountState = MockDataFactory.createAccountState({
-        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000),
+        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000), // 5 USDT в риске
+        available_quote_balance: MockDataFactory.createDecimal(20000), // ОЧЕНЬ большой баланс, чтобы проверка баланса не сработала раньше
       });
       const strategyContext = MockDataFactory.createStrategyContext();
       const marketData = MockDataFactory.createMarketData({
         current_price: MockDataFactory.createDecimal(50000),
       });
+      // Расчет: 5 USDT / 50 = 0.1 BTC, размер позиции = 0.1 * 50000 = 5000 USDT
+      // После округления может быть немного меньше, но minNotional 10000 должен быть больше
       const exchangeRules = MockDataFactory.createMarketRules({
-        minNotional: MockDataFactory.createDecimal(10),
+        minNotional: MockDataFactory.createDecimal(10000), // Очень высокий минимум (больше чем стоимость ордера ~5000)
+        precision: {
+          amount: MockDataFactory.createDecimal('0.00000001'),
+          price: MockDataFactory.createDecimal('0.01'),
+        },
       });
 
       expect(() => {
@@ -416,22 +431,29 @@ describe('ValidatorService', () => {
         action: 'OPEN_LONG',
         parameters: {
           type: 'market',
-          stop_loss_price: MockDataFactory.createDecimal(45000), // Дистанция 5000 для большого размера
-          risk_percent: MockDataFactory.createDecimal(1.0), // 1% риска
+          stop_loss_price: MockDataFactory.createDecimal(40000), // Дистанция 10000 для большого размера
+          risk_percent: MockDataFactory.createDecimal(5.0), // 5% риска = 500 USDT
         },
       });
 
       const accountState = MockDataFactory.createAccountState({
-        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000), // 100 USDT в риске
-        available_quote_balance: MockDataFactory.createDecimal(50), // Меньше чем нужно
+        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000), // 500 USDT в риске
+        available_quote_balance: MockDataFactory.createDecimal(100), // Меньше чем нужно (нужно ~2500 USDT)
       });
-      const strategyContext = MockDataFactory.createStrategyContext();
+      const strategyContext = MockDataFactory.createStrategyContext({
+        risk_rules: {
+          default_risk_per_trade_percent: 1.0,
+          max_allowed_risk_per_trade_percent: 10.0, // Разрешаем большой риск
+          max_total_portfolio_risk_percent: 50.0,
+          desired_risk_reward_ratio: 2.0,
+        },
+      });
       const marketData = MockDataFactory.createMarketData({
         current_price: MockDataFactory.createDecimal(50000),
       });
       const exchangeRules = MockDataFactory.createMarketRules({
         precision: {
-          amount: MockDataFactory.createDecimal('0.0001'), // Менее строгое округление
+          amount: MockDataFactory.createDecimal('0.00000001'),
           price: MockDataFactory.createDecimal('0.01'),
         },
         minNotional: MockDataFactory.createDecimal(5),
@@ -449,22 +471,29 @@ describe('ValidatorService', () => {
         action: 'OPEN_LONG',
         parameters: {
           type: 'market',
-          stop_loss_price: MockDataFactory.createDecimal(40000), // Дистанция 10000 (больше для большого размера)
-          risk_percent: MockDataFactory.createDecimal(2.0), // 2% риска = 200 USDT
+          stop_loss_price: MockDataFactory.createDecimal(30000), // Дистанция 20000 (большая для большого размера)
+          risk_percent: MockDataFactory.createDecimal(5.0), // 5% риска = 500 USDT
         },
       });
 
       const accountState = MockDataFactory.createAccountState({
-        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000), // 200 USDT в риске
+        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000), // 500 USDT в риске
         available_quote_balance: MockDataFactory.createDecimal(5000), // Достаточно баланса
       });
-      const strategyContext = MockDataFactory.createStrategyContext();
+      const strategyContext = MockDataFactory.createStrategyContext({
+        risk_rules: {
+          default_risk_per_trade_percent: 1.0,
+          max_allowed_risk_per_trade_percent: 10.0, // Разрешаем большой риск
+          max_total_portfolio_risk_percent: 50.0,
+          desired_risk_reward_ratio: 2.0,
+        },
+      });
       const marketData = MockDataFactory.createMarketData({
         current_price: MockDataFactory.createDecimal(50000),
       });
       const exchangeRules = MockDataFactory.createMarketRules({
         precision: {
-          amount: MockDataFactory.createDecimal('0.001'), // Менее строгое округление
+          amount: MockDataFactory.createDecimal('0.00000001'), // Стандартная точность BTC
           price: MockDataFactory.createDecimal('0.01'),
         },
         minNotional: MockDataFactory.createDecimal(5), // Низкий минимум для теста

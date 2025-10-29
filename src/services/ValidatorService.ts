@@ -315,8 +315,11 @@ export class ValidatorService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const amountPrecisionDecimal = precision.amount as any;
     // Вычисляем множитель на основе precision (например, 0.00000001 -> множитель 10^8)
+    // precision.e отрицательное для малых чисел (например, -8 для 0.00000001), поэтому берем abs
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const amountMultiplier = new DecimalConstructor(10).pow(amountPrecisionDecimal.e || 0);
+    const amountPrecisionE = amountPrecisionDecimal.e !== undefined ? Math.abs(amountPrecisionDecimal.e) : 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const amountMultiplier = new DecimalConstructor(10).pow(amountPrecisionE);
     // Округляем вниз до нужной точности
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const roundedAmountCoin = rawAmountCoinDecimal.mul(amountMultiplier).floor().div(amountMultiplier) as DecimalValue;
@@ -327,8 +330,11 @@ export class ValidatorService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const pricePrecisionDecimal = precision.price as any;
     // Вычисляем множитель на основе precision (например, 0.01 -> множитель 10^2)
+    // precision.e отрицательное для малых чисел (например, -2 для 0.01), поэтому берем abs
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const priceMultiplier = new DecimalConstructor(10).pow(pricePrecisionDecimal.e || 0);
+    const pricePrecisionE = pricePrecisionDecimal.e !== undefined ? Math.abs(pricePrecisionDecimal.e) : 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const priceMultiplier = new DecimalConstructor(10).pow(pricePrecisionE);
     // Округляем вниз до нужной точности
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const roundedEntryPrice = rawEntryPriceDecimal.mul(priceMultiplier).floor().div(priceMultiplier) as DecimalValue;

@@ -187,7 +187,7 @@ export class TSLHandlerService {
         // 1. Обновить TSL_State
         await client.query(
           `UPDATE TSL_State 
-           SET current_stop_price = $1, current_stop_limit_id = $2, price_seen = $3, updated_at = NOW()
+           SET current_stop_price = $1, current_stop_order_id = $2, price_seen = $3, updated_at = NOW()
            WHERE pair = $4`,
           [newStopPrice.toString(), newSlOrder.id, currentPrice.toString(), pair],
         );

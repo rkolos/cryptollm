@@ -530,13 +530,145 @@ export class WorkerService {
     });
   }
 
-  private async handleClosePosition(
+  /**
+   * Обработчик закрытия позиции (Market или Limit)
+   */
+  private async handleClosePosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
+    const { type } = decision.parameters;
+
+    if (type === 'market') {
+      // Логика Задачи 7.3
+      await this._handleCloseMarketPosition(decision, validationResult);
+    } else if (type === 'limit') {
+      // Логика Задачи 7.3.1 (заглушка)
+      await this._handleCloseLimitPosition(decision, validationResult);
+    } else {
+      throw new Error(`[${decision.pair}] Неизвестный тип ордера в handleClosePosition: ${type}`);
+    }
+  }
+
+  /**
+   * Реализация CLOSE_POSITION (Market) - Задача 7.3
+   * Немедленное закрытие позиции через market ордер
+   */
+  private async _handleCloseMarketPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
+    const { pair } = decision;
+
+    this.logger.debug(`[${pair}] Запуск _handleCloseMarketPosition.`);
+
+    // Критично: Вся операция выполняется в ОДНОЙ транзакции
+    await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+      // --- Шаг 1: Получить Позицию из БД (и заблокировать строку) ---
+      // Мы должны получить точное кол-во и сторону ПЕРЕД закрытием
+      const positionResult = await client.query(
+        `SELECT amount, side, average_entry_price FROM ActivePositions WHERE pair = $1 FOR UPDATE`,
+        [pair],
+      );
+
+      if (positionResult.rowCount === 0) {
+        // Это может случиться, если SL сработал за мгновение до этого
+        this.logger.warn(
+          `[${pair}] Попытка закрыть позицию, которая уже не существует в БД. (Возможно, SL/TP сработал?)`,
+        );
+        throw new Error(`[${pair}] (ОШИБКА СИНХРОНИЗАЦИИ) Позиция для закрытия не найдена в ActivePositions.`);
+      }
+
+      const currentPosition = positionResult.rows[0];
+      const positionAmountDecimal = new DecimalConstructor(currentPosition.amount.toString());
+      const positionSide = currentPosition.side as 'long' | 'short';
+
+      // Определяем ордер на закрытие
+      const closeSide: 'buy' | 'sell' = positionSide === 'long' ? 'sell' : 'buy';
+
+      this.logger.debug(
+        `[${pair}] Закрытие ${positionSide} позиции. Объем: ${positionAmountDecimal.toString()}, Сторона ордера: ${closeSide}.`,
+      );
+
+      // --- Шаг 2: (Архитектура 7.3) - НЕ отменять ордера ---
+      // Мы НЕ вызываем cancelAllOrders здесь, чтобы избежать "гонок".
+      // Вместо этого мы атомарно удалим их из ActiveOrders (Шаг 4).
+      // "Осиротевшие" ордера на бирже будут очищены "Сверщиком" (SyncEngine 5.1).
+
+      // --- Шаг 3: Создание Market ордера на Закрытие ---
+      const closeMarketOrder = await this.executionService.createOrderWithRetry(
+        pair,
+        'market',
+        closeSide,
+        positionAmountDecimal,
+      );
+
+      // Извлекаем РЕАЛЬНЫЕ данные исполнения
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const orderAny = closeMarketOrder as any;
+      const realClosePrice = orderAny.average || orderAny.price;
+      const realAmount = orderAny.filled || orderAny.amount;
+      const realFeeCost = orderAny.fee?.cost ?? new DecimalConstructor(0);
+      const realTimestamp = orderAny.timestamp ?? Date.now();
+
+      if (!realClosePrice || !realAmount) {
+        throw new Error(
+          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Market ордер (Закрытие) ${closeMarketOrder.id} вернул 'null' price или 'null' amount.`,
+        );
+      }
+
+      this.logger.debug(
+        `[${pair}] Market ордер (Закрытие) ${closeMarketOrder.id} исполнен. Price: ${realClosePrice.toString()}, Amount: ${realAmount.toString()}`,
+      );
+
+      // Конвертируем DecimalValue в Decimal для вычислений
+      const closePriceDecimal = new DecimalConstructor(realClosePrice.toString());
+      const amountDecimal = new DecimalConstructor(realAmount.toString());
+      const feeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
+
+      // --- Шаг 4: Атомарная Очистка БД ---
+
+      // 1. Удалить Позицию
+      await client.query(`DELETE FROM ActivePositions WHERE pair = $1`, [pair]);
+
+      // 2. Удалить ВСЕ связанные ордера (SL, TP, Limit)
+      await client.query(`DELETE FROM ActiveOrders WHERE pair = $1`, [pair]);
+
+      // 3. Удалить ВСЕ связанные TSL
+      await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
+
+      // 4. Сохранить Историю (выход)
+      // Для exchange_trade_id используем order.id + timestamp для уникальности
+      const exchangeTradeId = `${closeMarketOrder.id}-${realTimestamp}`;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const feeCurrency = (orderAny.fee?.currency as string) || 'USDT';
+
+      await client.query(
+        `INSERT INTO TradeHistory (
+          timestamp, exchange_trade_id, exchange_order_id, pair, side, price, amount, fee_cost, fee_currency
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          new Date(realTimestamp),
+          exchangeTradeId,
+          closeMarketOrder.id,
+          pair,
+          closeSide, // Сторона ордера ('buy' или 'sell')
+          closePriceDecimal.toNumber(),
+          amountDecimal.toNumber(),
+          feeCostDecimal.toNumber(),
+          feeCurrency,
+        ],
+      );
+
+      this.logger.info(`[${pair}] Атомарная транзакция (CLOSE Market) УСПЕШНА.`);
+    });
+  }
+
+  /**
+   * Заглушка для CLOSE_POSITION (Limit) - Задача 7.3.1
+   */
+  private async _handleCloseLimitPosition(
     decision: LLMDecision,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _validationResult: CalculatedAmounts,
   ): Promise<void> {
-    this.logger.debug(`[${decision.pair}] (STUB) Вызов handleClosePosition...`);
-    // Логика Задачи 7.3 / 7.3.1 будет здесь
+    this.logger.debug(`[${decision.pair}] (STUB) Вызов _handleCloseLimitPosition...`);
+    // Логика Задачи 7.3.1 будет здесь
+    throw new Error(`[${decision.pair}] CLOSE_POSITION (Limit) еще не реализовано. См. Задачу 7.3.1`);
   }
 
   private async handleModifyPosition(

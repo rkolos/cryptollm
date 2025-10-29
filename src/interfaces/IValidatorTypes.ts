@@ -1,4 +1,5 @@
 import Decimal from 'decimal.js';
+import type { LLMTriggerCondition } from './ILLMTypes.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const decimalInstance = new (Decimal as any)(0);
@@ -43,6 +44,7 @@ export interface AccountState {
   open_positions: OpenPosition[];
   open_orders: unknown[];
   tslRules: Map<string, TSLRule>;
+  llmTriggers: Map<string, LLMTriggerCondition[]>;
 }
 
 export interface MarketData {

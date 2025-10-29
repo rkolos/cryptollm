@@ -13,6 +13,7 @@ import type {
   TSLState,
   TSLRuleConfig,
 } from '../interfaces/IValidatorTypes.js';
+import type { LLMTriggerCondition } from '../interfaces/ILLMTypes.js';
 import type winston from 'winston';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,6 +58,7 @@ export class AccountStateService {
     open_positions: [],
     open_orders: [],
     tslRules: new Map<string, TSLRule>(),
+    llmTriggers: new Map<string, LLMTriggerCondition[]>(),
   };
   private refreshPromise: Promise<void> | null = null;
 
@@ -135,11 +137,12 @@ export class AccountStateService {
         this.logger.debug('Refreshing account state...');
 
         // Параллельный запрос данных из всех источников
-        const [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult] = await Promise.all([
+        const [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult, dbLlmTriggersResult] = await Promise.all([
           this.exchangeService.fetchBalance(),
           this.databaseService.query('SELECT * FROM ActivePositions'),
           this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
           this.databaseService.query('SELECT * FROM TSL_State'),
+          this.databaseService.query('SELECT * FROM LLM_Triggers'),
         ]);
 
         // Парсинг баланса
@@ -256,6 +259,22 @@ export class AccountStateService {
           tslRulesMap.set(pair, tslRule);
         }
 
+        // Парсинг LLM_Triggers из БД
+        const llmTriggersMap = new Map<string, LLMTriggerCondition[]>();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const llmTriggersRows = dbLlmTriggersResult.rows as any[];
+        for (const row of llmTriggersRows) {
+          const pair = row.pair as string;
+          let triggerConditions: LLMTriggerCondition[] = [];
+          try {
+            triggerConditions = JSON.parse(row.trigger_conditions_json) as LLMTriggerCondition[];
+          } catch (error) {
+            this.logger.error(`Ошибка парсинга trigger_conditions_json для пары ${pair}:`, error);
+            continue;
+          }
+          llmTriggersMap.set(pair, triggerConditions);
+        }
+
         // Обновление кэша
         this.accountStateCache = {
           total_portfolio_value_usdt: totalPortfolioValueUsdt,
@@ -264,10 +283,11 @@ export class AccountStateService {
           open_positions: openPositions,
           open_orders: openOrders,
           tslRules: tslRulesMap,
+          llmTriggers: llmTriggersMap,
         };
 
         this.logger.info(
-          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}, tslRules=${tslRulesMap.size}`,
+          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}, tslRules=${tslRulesMap.size}, llmTriggers=${llmTriggersMap.size}`,
         );
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);

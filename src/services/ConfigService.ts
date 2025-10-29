@@ -13,6 +13,7 @@ const configSchema = z.object({
   WATCHLIST: z.string().min(1),
   LLM_API_URL: z.string().url().optional(),
   LLM_API_KEY: z.string().optional(),
+  LLM_MODEL_NAME: z.string().optional(),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
   STRATEGY_ROLE: z.string().min(1),
@@ -92,6 +93,7 @@ export class ConfigService {
     return {
       apiUrl: this.config.LLM_API_URL,
       apiKey: this.config.LLM_API_KEY,
+      modelName: this.config.LLM_MODEL_NAME,
     };
   }
 

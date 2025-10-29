@@ -3,15 +3,29 @@ import { DatabaseService } from './DatabaseService.js';
 import { LLMRequestAssemblerService } from './LLMRequestAssemblerService.js';
 import { SyncEngineService } from './SyncEngineService.js';
 import { PairActorManagerService } from './PairActorManagerService.js';
+import { AccountStateService } from './AccountStateService.js';
+import { ConfigService } from './ConfigService.js';
+import { MarketDataService } from './MarketDataService.js';
+import Decimal from 'decimal.js';
 import type { ILLMService } from '../interfaces/ILLMService.js';
 import type { LLMDecision, LLMResponse } from '../interfaces/ILLMTypes.js';
+import type { AccountState, StrategyContext, MarketData } from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DecimalConstructor = Decimal as any;
 
 /**
  * Интерфейс для WorkerService (будет реализован в задаче 7.1)
  */
 export interface IWorkerService {
-  execute(decision: LLMDecision, llm_decision_log_id: string): Promise<void>;
+  execute(
+    decision: LLMDecision,
+    llm_decision_log_id: string,
+    accountState: AccountState,
+    strategyContext: StrategyContext,
+    marketData: MarketData,
+  ): Promise<void>;
 }
 
 /**
@@ -31,6 +45,9 @@ export class WatcherOrchestratorService {
   private readonly workerService: IWorkerService;
   private readonly pairActorManager: PairActorManagerService;
   private readonly notificationService: INotificationService;
+  private readonly accountStateService: AccountStateService;
+  private readonly configService: ConfigService;
+  private readonly marketDataService: MarketDataService;
 
   private constructor(
     databaseService: DatabaseService,
@@ -40,6 +57,9 @@ export class WatcherOrchestratorService {
     workerService: IWorkerService,
     pairActorManager: PairActorManagerService,
     notificationService: INotificationService,
+    accountStateService: AccountStateService,
+    configService: ConfigService,
+    marketDataService: MarketDataService,
   ) {
     this.databaseService = databaseService;
     this.llmService = llmService;
@@ -48,6 +68,9 @@ export class WatcherOrchestratorService {
     this.workerService = workerService;
     this.pairActorManager = pairActorManager;
     this.notificationService = notificationService;
+    this.accountStateService = accountStateService;
+    this.configService = configService;
+    this.marketDataService = marketDataService;
     this.logger = LoggingService.getInstance().getLogger('WatcherOrchestrator');
     this.logger.info('WatcherOrchestratorService initialized.');
   }
@@ -60,6 +83,9 @@ export class WatcherOrchestratorService {
     workerService: IWorkerService,
     pairActorManager: PairActorManagerService,
     notificationService: INotificationService,
+    accountStateService: AccountStateService,
+    configService: ConfigService,
+    marketDataService: MarketDataService,
   ): WatcherOrchestratorService {
     if (!WatcherOrchestratorService.instance) {
       WatcherOrchestratorService.instance = new WatcherOrchestratorService(
@@ -70,6 +96,9 @@ export class WatcherOrchestratorService {
         workerService,
         pairActorManager,
         notificationService,
+        accountStateService,
+        configService,
+        marketDataService,
       );
     }
     return WatcherOrchestratorService.instance;
@@ -191,10 +220,43 @@ export class WatcherOrchestratorService {
             return;
           }
 
-          // Шаг 4: Исполнение решений
+          // Шаг 4: Подготовка данных для WorkerService (необходимы для Validator)
+          // Получаем свежие данные из кэша (синхронно)
+          const accountState = this.accountStateService.getAccountState();
+
+          // Формируем StrategyContext из ConfigService
+          const riskRules = this.configService.getRiskRules();
+          const strategyContext: StrategyContext = {
+            risk_rules: {
+              default_risk_per_trade_percent: riskRules.defaultRiskPercent,
+              max_allowed_risk_per_trade_percent: riskRules.maxAllowedRiskPercent,
+              max_total_portfolio_risk_percent: riskRules.maxTotalPortfolioRiskPercent,
+              desired_risk_reward_ratio: riskRules.desiredRiskRewardRatio,
+            },
+          };
+
+          // Получаем MarketData для текущей пары
+          let marketData: MarketData;
+          try {
+            const ticker = await this.marketDataService.fetchTicker(pair);
+            marketData = {
+              pair,
+              current_price: ticker.last,
+            };
+          } catch (error) {
+            this.logger.error(`[${pair}] Ошибка получения MarketData, используем fallback:`, error);
+            // Fallback: используем цену из requestPayload или 0
+            marketData = {
+              pair,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              current_price: new DecimalConstructor(0) as any as MarketData['current_price'],
+            };
+          }
+
+          // Шаг 5: Исполнение решений
           for (const decision of llmResponse.decisions) {
             try {
-              await this.workerService.execute(decision, llmLogId);
+              await this.workerService.execute(decision, llmLogId, accountState, strategyContext, marketData);
               this.logger.debug(`[${pair}] Решение [${decision.action}] передано в WorkerService.`);
             } catch (error) {
               // Worker сам обрабатывает ошибки и обновляет LLM_Decision_Log
@@ -203,7 +265,7 @@ export class WatcherOrchestratorService {
             }
           }
 
-          // Шаг 5: Пост-Сверка (критично - только если есть решения)
+          // Шаг 6: Пост-Сверка (критично - только если есть решения)
           if (llmResponse.decisions.length > 0) {
             this.logger.info(`[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации...`);
             try {

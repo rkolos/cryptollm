@@ -374,8 +374,25 @@ export class SlowCycleService {
                     justification: 'Принудительное закрытие из-за пробития Stop-Loss (Stop-Loss Janitor)',
                   };
 
-                  // Вызываем workerService.execute с null для llmLogId (т.к. это не из LLM)
-                  await this.workerService.execute(closeDecision, '');
+                  // Подготовка данных для WorkerService
+                  const accountState = this.accountStateService.getAccountState();
+                  const riskRules = this.configService.getRiskRules();
+                  const strategyContext = {
+                    risk_rules: {
+                      default_risk_per_trade_percent: riskRules.defaultRiskPercent,
+                      max_allowed_risk_per_trade_percent: riskRules.maxAllowedRiskPercent,
+                      max_total_portfolio_risk_percent: riskRules.maxTotalPortfolioRiskPercent,
+                      desired_risk_reward_ratio: riskRules.desiredRiskRewardRatio,
+                    },
+                  };
+                  const ticker = await this.exchangeService.fetchTicker(position.pair);
+                  const marketData = {
+                    pair: position.pair,
+                    current_price: ticker.last,
+                  };
+
+                  // Вызываем workerService.execute (llmLogId пустой для Stop-Loss Janitor)
+                  await this.workerService.execute(closeDecision, '', accountState, strategyContext, marketData);
                 })
                 .catch((actorError) => {
                   this.logger.error(

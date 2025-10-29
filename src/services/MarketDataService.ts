@@ -51,6 +51,15 @@ export class MarketDataService {
     }
   }
 
+  public async fetchTicker(pair: string): Promise<import('../interfaces/IExchangeService.js').IDecimalTicker> {
+    try {
+      return await this.exchangeService.fetchTicker(pair);
+    } catch (error) {
+      this.logger.error(`Error fetching ticker for ${pair}:`, error);
+      throw error;
+    }
+  }
+
   public async fetchRecentTrades(pair: string, limit: number = 50): Promise<RecentTrade[]> {
     try {
       const trades = await this.exchangeService.fetchMyTrades(pair, undefined, limit);

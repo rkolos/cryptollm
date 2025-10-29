@@ -149,9 +149,21 @@ async function main(): Promise<void> {
       macroContextService,
     );
 
-    // ValidatorService будет использоваться в WorkerService (задача 7.1)
-    // const validatorService = ValidatorService.getInstance(exchangeRulesService);
-    const workerService = WorkerService.getInstance(databaseService);
+    // ValidatorService для WorkerService
+    const validatorService = ValidatorService.getInstance(exchangeRulesService);
+
+    // WorkerService (задача 7.1)
+    const workerService = WorkerService.getInstance(
+      validatorService,
+      guaranteedOrderService,
+      databaseService,
+      eventBus,
+      notificationService,
+      globalState,
+      accountStateService,
+      exchangeRulesService,
+      config,
+    );
 
     const syncEngine = SyncEngineService.getInstance(
       config,
@@ -170,6 +182,9 @@ async function main(): Promise<void> {
       workerService,
       pairActorManager,
       notificationService,
+      accountStateService,
+      config,
+      marketDataService,
     );
 
     const tslHandler = TSLHandlerService.getInstance(

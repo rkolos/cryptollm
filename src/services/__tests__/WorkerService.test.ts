@@ -63,6 +63,10 @@ describe('WorkerService', () => {
 
     mockConfigService = {} as unknown as ConfigService;
 
+    // ВАЖНО: WorkerService использует Singleton, нужно сбросить instance перед каждым тестом
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (WorkerService as any).instance = undefined;
+
     workerService = WorkerService.getInstance(
       mockValidatorService,
       mockExecutionService,
@@ -111,7 +115,7 @@ describe('WorkerService', () => {
     });
 
     it('должен продолжить выполнение при успешной валидации', async () => {
-      // ВАЖНО: Сбрасываем мок, чтобы убедиться, что предыдущий тест не влияет
+      // ВАЖНО: Сбрасываем мок валидатора, чтобы убедиться, что предыдущий тест не влияет
       (mockValidatorService.validateDecision as any).mockReset();
 
       const decision = MockDataFactory.createLLMDecision({
@@ -169,13 +173,15 @@ describe('WorkerService', () => {
 
       // Мокируем разные ответы для разных типов ордеров
       let callCount = 0;
+      // ВАЖНО: Сбрасываем мок перед настройкой и устанавливаем новую реализацию
+      (mockExecutionService.createOrderWithRetry as any).mockReset();
       (mockExecutionService.createOrderWithRetry as any).mockImplementation(async (
-        pair: string,
+        _pair: string,
         type: string,
-        side: string,
-        amount: any,
-        price?: any,
-        params?: any,
+        _side: string,
+        _amount: any,
+        _price?: any,
+        _params?: any,
       ) => {
         callCount++;
         if (type === 'market') {

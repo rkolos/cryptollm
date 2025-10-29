@@ -22,6 +22,9 @@ describe('SyncEngineService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // ВАЖНО: SyncEngineService использует Singleton, нужно сбросить instance перед каждым тестом
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (SyncEngineService as any).instance = undefined;
 
     mockExchangeService = createMockExchangeService();
     mockDatabaseService = createMockDatabaseService();

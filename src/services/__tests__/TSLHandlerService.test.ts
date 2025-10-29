@@ -17,6 +17,9 @@ describe('TSLHandlerService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // ВАЖНО: TSLHandlerService использует Singleton, нужно сбросить instance перед каждым тестом
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (TSLHandlerService as any).instance = undefined;
 
     mockGuaranteedExecutor = createMockGuaranteedOrderExecutionService();
     mockDatabaseService = createMockDatabaseService();

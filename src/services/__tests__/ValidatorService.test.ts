@@ -10,6 +10,9 @@ describe('ValidatorService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // ВАЖНО: ValidatorService использует Singleton, нужно сбросить instance перед каждым тестом
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (ValidatorService as any).instance = undefined;
     mockExchangeRulesService = createMockExchangeRulesService();
     validatorService = ValidatorService.getInstance(mockExchangeRulesService);
   });
@@ -394,36 +397,49 @@ describe('ValidatorService', () => {
 
   describe('validateDecision - Exchange and Balance Rules', () => {
     it('должен выбросить ошибку если стоимость ордера < minNotional', () => {
+      // Используем большую дистанцию и маленький риск, чтобы получить маленькую стоимость ордера
+      // Но при этом риск должен быть больше fee для прохождения проверки Fee vs Risk
+      // Расчет: 15 USDT / 1000 = 0.015 BTC, размер позиции = 0.015 * 50000 = 750 USDT
+      // Round-trip fee = 750 * 0.001 * 2 = 1.5 USDT, что МЕНЬШЕ риска (15), так что пройдет Fee vs Risk
+      // minNotional 1000 больше чем 750, так что проверка minNotional упадет
       const decision = MockDataFactory.createLLMDecision({
         action: 'OPEN_LONG',
         parameters: {
           type: 'market',
-          stop_loss_price: MockDataFactory.createDecimal(49950), // Дистанция 50
-          risk_percent: MockDataFactory.createDecimal(0.05), // 0.05% риска = 5 USDT
+          stop_loss_price: MockDataFactory.createDecimal(49000), // Дистанция 1000 (больше)
+          risk_percent: MockDataFactory.createDecimal(0.15), // 0.15% риска = 15 USDT (явно больше чем fee ~1.5)
         },
       });
 
       const accountState = MockDataFactory.createAccountState({
-        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000), // 5 USDT в риске
-        available_quote_balance: MockDataFactory.createDecimal(20000), // ОЧЕНЬ большой баланс, чтобы проверка баланса не сработала раньше
+        total_portfolio_value_usdt: MockDataFactory.createDecimal(10000), // 15 USDT в риске
+        available_quote_balance: MockDataFactory.createDecimal(20000), // ОЧЕНЬ большой баланс
       });
       const strategyContext = MockDataFactory.createStrategyContext();
       const marketData = MockDataFactory.createMarketData({
         current_price: MockDataFactory.createDecimal(50000),
       });
-      // Расчет: 5 USDT / 50 = 0.1 BTC, размер позиции = 0.1 * 50000 = 5000 USDT
-      // После округления может быть немного меньше, но minNotional 10000 должен быть больше
       const exchangeRules = MockDataFactory.createMarketRules({
-        minNotional: MockDataFactory.createDecimal(10000), // Очень высокий минимум (больше чем стоимость ордера ~5000)
+        minNotional: MockDataFactory.createDecimal(1000), // Очень высокий минимум (больше чем стоимость ордера после округления)
         precision: {
           amount: MockDataFactory.createDecimal('0.00000001'),
           price: MockDataFactory.createDecimal('0.01'),
         },
       });
 
+      // ВАЖНО: Мокируем exchangeRulesService.getRules, чтобы он возвращал правила из теста
+      // ValidatorService вызывает getRules для пары несколько раз через this.exchangeRulesService.getRules(pair)
+      // validatorService хранит ссылку на mockExchangeRulesService (установлен в beforeEach)
+      // Сбрасываем мок и устанавливаем mockReturnValue для множественных вызовов
+      (mockExchangeRulesService.getRules as any).mockReset();
+      (mockExchangeRulesService.getRules as any).mockReturnValue(exchangeRules);
+
       expect(() => {
         validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
       }).toThrow(/Рассчитанная стоимость ордера.*ниже биржевого минимума/);
+
+      // Проверяем, что getRules был вызван
+      expect(mockExchangeRulesService.getRules).toHaveBeenCalledWith(decision.pair);
     });
 
     it('должен выбросить ошибку если недостаточно баланса', () => {

@@ -18,11 +18,11 @@ describe('NotificationService', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (NotificationService as any).instance = undefined;
 
-    // Мокируем ConfigService
+    // Мокируем ConfigService с включенным Telegram (но bot будет null в тестах)
     mockConfigService = {
       getTelegramConfig: vi.fn(() => ({
-        botToken: null, // Отключаем Telegram для тестов
-        chatId: null,
+        botToken: 'test_token', // Включаем для тестов (бот всё равно не будет создан)
+        chatId: 'test_chat_id',
       })),
     } as unknown as ConfigService;
 
@@ -181,4 +181,3 @@ describe('NotificationService', () => {
     });
   });
 });
-

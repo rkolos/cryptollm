@@ -174,15 +174,6 @@ export class ProductionExchangeService implements IExchangeService {
     params?: Record<string, unknown>,
   ): Promise<IDecimalOrder> {
     return await this.execute(async () => {
-      const orderParams: ccxt.OrderRequest = {
-        symbol,
-        type: type as ccxt.OrderType,
-        side: side as ccxt.OrderSide,
-        amount: amount.toNumber(),
-        ...(price && { price: price.toNumber() }),
-        ...params,
-      };
-
       const order = await this.ccxtExchange.createOrder(
         symbol,
         type as ccxt.OrderType,

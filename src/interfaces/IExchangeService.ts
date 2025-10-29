@@ -70,6 +70,7 @@ export interface IDecimalTrade {
 
 export interface IExchangeService {
   loadMarkets(): Promise<void>;
+  getRawMarkets(): Record<string, unknown>;
   fetchOHLCV(symbol: string, timeframe: string, since?: number, limit?: number): Promise<IDecimalOHLCV[]>;
   fetchTicker(symbol: string): Promise<IDecimalTicker>;
   fetchOrderBook(symbol: string, limit?: number): Promise<IDecimalOrderBook>;

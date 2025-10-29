@@ -93,6 +93,10 @@ export class ProductionExchangeService implements IExchangeService {
     });
   }
 
+  public getRawMarkets(): Record<string, unknown> {
+    return this.ccxtExchange.markets as Record<string, unknown>;
+  }
+
   public async fetchOHLCV(symbol: string, timeframe: string, since?: number, limit?: number): Promise<IDecimalOHLCV[]> {
     return await this.execute(async () => {
       const ohlcv = await this.ccxtExchange.fetchOHLCV(symbol, timeframe, since, limit);

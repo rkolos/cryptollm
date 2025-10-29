@@ -183,7 +183,14 @@ export class ProductionExchangeService implements IExchangeService {
         ...params,
       };
 
-      const order = await this.ccxtExchange.createOrder(symbol, type as ccxt.OrderType, side as ccxt.OrderSide, amount.toNumber(), price?.toNumber(), params);
+      const order = await this.ccxtExchange.createOrder(
+        symbol,
+        type as ccxt.OrderType,
+        side as ccxt.OrderSide,
+        amount.toNumber(),
+        price?.toNumber(),
+        params,
+      );
       return {
         id: String(order.id),
         clientOrderId: order.clientOrderId ? String(order.clientOrderId) : undefined,
@@ -254,19 +261,20 @@ export class ProductionExchangeService implements IExchangeService {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const t = trade as any;
         return {
-        id: String(trade.id || ''),
-        order: trade.order ? String(trade.order) : '',
-        symbol: String(trade.symbol || ''),
-        side: trade.side as 'buy' | 'sell',
-        amount: this.toDecimal(trade.amount),
-        price: this.toDecimal(trade.price),
-        cost: this.toDecimal(trade.cost),
-        fee: {
-          cost: this.toDecimal(trade.fee?.cost),
-          currency: trade.fee?.currency || '',
-        },
-        timestamp: trade.timestamp || 0,
-      }));
+          id: String(t.id || ''),
+          order: t.order ? String(t.order) : '',
+          symbol: String(t.symbol || ''),
+          side: t.side as 'buy' | 'sell',
+          amount: this.toDecimal(t.amount),
+          price: this.toDecimal(t.price),
+          cost: this.toDecimal(t.cost),
+          fee: {
+            cost: this.toDecimal(t.fee?.cost),
+            currency: t.fee?.currency || '',
+          },
+          timestamp: t.timestamp || 0,
+        };
+      });
     });
   }
 

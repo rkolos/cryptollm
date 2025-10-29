@@ -1,0 +1,88 @@
+# Техническое Задание (ТЗ): 2.2 Внедрение системы Миграций
+
+**Эпик:** 2. 🐘 Архитектура Базы Данных (PostgreSQL) **Задача:** 2.2 Внедрение системы Миграций **Архитектор:** Gemini **Дата:** 29.10.2025
+
+## 1\. Цель Задачи
+
+Интегрировать в проект инструмент управления миграциями `node-pg-migrate`. Создать npm-скрипты для выполнения миграций и реализовать первую "начальную" миграцию, которая развертывает схему, спроектированную в Задаче 2.1.
+
+## 2\. Архитектурное Решение
+
+1.  **Инструмент:** Мы будем использовать `node-pg-migrate`, так как он хорошо зарекомендовал себя, поддерживает `ESM` (через `ts-node`) и позволяет писать миграции как на `.ts`, так и на чистом `.sql`.
+2.  **Скрипт-Раннер (Критично):** Мы **не будем** использовать CLI `node-pg-migrate` _напрямую_ для `up` и `down`. Вместо этого мы _обязаны_ создать собственный скрипт-обертку (`scripts/migrate.ts`).
+3.  **Причина:** Этот "раннер" _обязан_ сначала инициализировать наш `ConfigService` (Задача 1.3), прочитать из него _актуальные_ учетные данные БД (`DATABASE_URL`) и _только потом_ передать эту конфигурацию в `node-pg-migrate` программно. Это гарантирует **единый источник истины** (SSOT) для конфигурации БД и избавляет от необходимости дублировать `.env` переменные.
+
+## 3\. Зависимости Задачи
+
+### 3.1. Зависимости NPM (Новые)
+
+1.  **Логика:** Разработчик _обязан_ установить `node-pg-migrate`. (Предполагается, что `ts-node` уже установлен из Задачи 1.1).
+2.  **Нюанс реализации:** `npm install -D node-pg-migrate`
+
+### 3.2. Внутренние Зависимости
+
+- `ConfigService` (1.3): (Зависимость) Для получения учетных данных БД.
+- `DDL-скрипт` (2.1): (Артефакт) DDL-код из `task-2.1-db-schema-design.md` будет телом первой миграции.
+
+## 4\. Описание и Нюансы Реализации
+
+### 4.1. `package.json` (Скрипты)
+
+1.  **Логика:** Разработчик _обязан_ добавить в `package.json` скрипты, которые абстрагируют `node-pg-migrate` и наш "раннер".
+2.  **Нюанс реализации:**
+    - `"migrate:create": "npx node-pg-migrate create --migration-file-language ts --verbose"` (Используем CLI только для _создания_ файлов).
+    - `"migrate:run": "npx ts-node ./scripts/migrate.ts"` (Наш кастомный "раннер").
+    - `"migrate:up": "npm run migrate:run -- up"`
+    - `"migrate:down": "npm run migrate:run -- down"`
+
+### 4.2. `scripts/migrate.ts` (Скрипт-Раннер)
+
+1.  **Логика:** Разработчик _обязан_ создать `scripts/migrate.ts`.
+2.  **Нюанс реализации (Критично):**
+    - Этот скрипт _обязан_ импортировать `dotenv/config` _в самом верху_.
+    - Он _обязан_ импортировать и _синхронно_ загрузить `ConfigService.load()`.
+    - Он _обязан_ получить `const dbConfig = ConfigService.getInstance().getDatabaseConfig()`.
+    - Он _обязан_ спарсить `process.argv[2]` для получения `direction` ('up' или 'down').
+    - Он _обязан_ сформировать `databaseUrl` из `dbConfig`.
+    - Он _обязан_ вызвать `await run(options)` (из `node-pg-migrate`), передав ему `databaseUrl`, `direction`, `dir: 'migrations'` и `migrationsTable: 'pgmigrations'`.
+    - Он _обязан_ корректно обрабатывать `try/catch` и выходить с `process.exit(1)` в случае ошибки.
+
+### 4.3. Первая Миграция (`001_initial_schema`)
+
+1.  **Логика:** Разработчик _обязан_ создать и настроить первую миграцию.
+2.  **Нюанс реализации:**
+    - **Шаг 1 (Папка):** Создать папку `migrations/sql/`.
+    - **Шаг 2 (Артефакт):** Взять _весь_ DDL-код из `task-2.1-db-schema-design.md` и сохранить его в `migrations/sql/001_initial_schema.sql`.
+    - **Шаг 3 (Генерация):** Выполнить `npm run migrate:create -- initial-schema`. Это создаст файл `migrations/<timestamp>_initial-schema.ts`.
+    - **Шаг 4 (Реализация `up`):** `up()` в `.ts` файле _обязан_ использовать `fs.readFileSync` для чтения `001_initial_schema.sql` и выполнить его через `await pgm.sql(sql)`.
+    - **Шаг 5 (Реализация `down` - Критично):** `down()` _обязан_ содержать `await pgm.sql('DROP TABLE IF EXISTS "TableName";')` для _всех 6 таблиц_, созданных в 2.1 (`LLM_Decision_Log`, `TradeHistory`, `LLM_Triggers`, `TSL_State`, `ActiveOrders`, `ActivePositions`). Порядок `DROP` важен, если бы были FK (Foreign Keys), но для идемпотентности `down` должен удалять всё.
+
+## 5\. Критерии Приемки (Acceptance Criteria)
+
+1.  Deps
+
+    `node-pg-migrate` установлен как `devDependency`.
+
+2.  Scripts
+
+    В `package.json` добавлены скрипты `migrate:create`, `migrate:run`, `migrate:up`, `migrate:down`.
+
+3.  Runner(Критично)
+
+    Файл `scripts/migrate.ts` создан и _успешно_ использует `ConfigService` для получения `databaseUrl` (т.е. `up/down` работают _без_ явного указания URL в CLI).
+
+4.  Artifacts
+
+    DDL-скрипт (из 2.1) корректно размещен в `migrations/sql/001_initial_schema.sql`.
+
+5.  MigrationFile
+
+    Файл `<timestamp>_initial-schema.ts` создан, его `up()` читает `.sql` файл, а `down()` реализует `DROP TABLE` для _всех 6_ таблиц.
+
+6.  Test:up(Критично)
+
+    `npm run migrate:up` (при наличии `.env` и _пустой_ БД) _успешно_ выполняется. В БД появляются 6 таблиц + таблица `pgmigrations` с 1 записью.
+
+7.  Test:down(Критично)
+
+    Сразу после (6), `npm run migrate:down` _успешно_ выполняется. Все 6 таблиц удалены. Таблица `pgmigrations` пуста.

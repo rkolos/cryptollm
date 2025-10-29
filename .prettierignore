@@ -1,0 +1,9 @@
+# Ignore documentation files
+*.md
+# Ignore lock files
+package-lock.json
+# Ignore node_modules
+node_modules
+# Ignore dist
+dist
+

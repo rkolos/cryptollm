@@ -2,9 +2,15 @@ import { ConfigService } from './ConfigService.js';
 import { DatabaseService } from './DatabaseService.js';
 import { PairActorManagerService } from './PairActorManagerService.js';
 import { LoggingService } from './LoggingService.js';
+import { ExchangeRulesService } from './ExchangeRulesService.js';
 import { OrderNotFoundError } from '../errors/ExchangeErrors.js';
-import type { IExchangeService, IDecimalOrder, IDecimalBalance } from '../interfaces/IExchangeService.js';
+import Decimal from 'decimal.js';
+import type { IExchangeService, IDecimalOrder, IDecimalBalance, DecimalValue } from '../interfaces/IExchangeService.js';
 import type winston from 'winston';
+import type { PoolClient } from 'pg';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DecimalConstructor = Decimal as any;
 
 interface DbOrder {
   id: number;
@@ -29,6 +35,28 @@ interface DbPosition {
   created_at: Date;
 }
 
+interface DbTrade {
+  id: number;
+  timestamp: Date;
+  exchange_trade_id: string;
+  exchange_order_id: string;
+  pair: string;
+  side: 'buy' | 'sell';
+  price: string;
+  amount: string;
+  fee_cost: string;
+  fee_currency: string;
+  realized_pnl_usd: string | null;
+  created_at: Date;
+}
+
+interface ReconstructedPosition {
+  side: 'long' | 'short';
+  amount: DecimalValue;
+  average_entry_price: DecimalValue;
+  total_fee_cost: DecimalValue;
+}
+
 export class SyncEngineService {
   private static instance: SyncEngineService | undefined;
   private readonly logger: winston.Logger;
@@ -36,17 +64,20 @@ export class SyncEngineService {
   private readonly databaseService: DatabaseService;
   private readonly exchangeService: IExchangeService;
   private readonly pairActorManager: PairActorManagerService;
+  private readonly exchangeRulesService: ExchangeRulesService;
 
   private constructor(
     configService: ConfigService,
     databaseService: DatabaseService,
     exchangeService: IExchangeService,
     pairActorManager: PairActorManagerService,
+    exchangeRulesService: ExchangeRulesService,
   ) {
     this.configService = configService;
     this.databaseService = databaseService;
     this.exchangeService = exchangeService;
     this.pairActorManager = pairActorManager;
+    this.exchangeRulesService = exchangeRulesService;
     this.logger = LoggingService.getInstance().getLogger('SyncEngine');
     this.logger.info('SyncEngineService initialized.');
   }
@@ -56,6 +87,7 @@ export class SyncEngineService {
     databaseService: DatabaseService,
     exchangeService: IExchangeService,
     pairActorManager: PairActorManagerService,
+    exchangeRulesService: ExchangeRulesService,
   ): SyncEngineService {
     if (!SyncEngineService.instance) {
       SyncEngineService.instance = new SyncEngineService(
@@ -63,6 +95,7 @@ export class SyncEngineService {
         databaseService,
         exchangeService,
         pairActorManager,
+        exchangeRulesService,
       );
     }
     return SyncEngineService.instance;
@@ -206,18 +239,188 @@ export class SyncEngineService {
     }
   }
 
-  // (STUB - Задача 5.1.1: Логика Сверки - "Судебная" Сверка Позиций)
+  // (Задача 5.1.1: Логика Сверки - "Судебная" Сверка Позиций)
   private async _reconcilePositionsForensic(
     pair: string,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _dbPositions: DbPosition[],
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    dbPositions: DbPosition[],
     _dbOrders: DbOrder[],
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _exchangeBalance: IDecimalBalance,
+    exchangeBalance: IDecimalBalance,
   ): Promise<void> {
-    this.logger.debug(`[${pair}] (STUB) _reconcilePositionsForensic...`);
-    // Логика "судебной" сверки на основе TradeHistory будет здесь
+    // Условие запуска: баланс базового актива > 0 И позиции в БД нет
+    const baseAsset = this.getBaseAsset(pair);
+    const baseAssetBalance = exchangeBalance[baseAsset]?.total;
+
+    if (!baseAssetBalance) {
+      this.logger.debug(`[${pair}] Баланс базового актива ${baseAsset} не найден. Пропускаем судебную сверку.`);
+      return;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const balanceDecimal = baseAssetBalance as any as DecimalValue;
+    const balanceValue = new DecimalConstructor(balanceDecimal.toString());
+
+    if (!balanceValue.greaterThan(0) || dbPositions.length > 0) {
+      this.logger.debug(
+        `[${pair}] Условие для судебной сверки не выполнено: balance=${balanceValue}, dbPositions=${dbPositions.length}`,
+      );
+      return;
+    }
+
+    this.logger.info(
+      `[${pair}] Запуск судебной сверки: баланс ${baseAsset}=${balanceValue}, позиций в БД=0. Восстанавливаем позицию...`,
+    );
+
+    // Вся логика восстановления в транзакции
+    await this.databaseService.executeInTransaction(async (client) => {
+      // Шаг 1: Сбор истории сделок
+      const [exchangeTradesResult, dbTradesResult] = await Promise.all([
+        this.exchangeService.fetchMyTrades(pair, undefined, 1000), // Получаем последние 1000 сделок
+        client.query('SELECT * FROM TradeHistory WHERE pair = $1 ORDER BY timestamp ASC', [pair]),
+      ]);
+
+      const exchangeTrades = exchangeTradesResult;
+      const dbTrades = dbTradesResult.rows as unknown[] as DbTrade[];
+
+      // Шаг 2: Находим недостающие сделки
+      const dbTradeIds = new Set(dbTrades.map((t) => t.exchange_trade_id));
+      const missingTrades = exchangeTrades.filter((t) => !dbTradeIds.has(t.id));
+
+      if (missingTrades.length > 0) {
+        this.logger.info(
+          `[${pair}] Обнаружено ${missingTrades.length} недостающих сделок. Вставляем в TradeHistory...`,
+        );
+
+        // Вставляем недостающие сделки
+        for (const trade of missingTrades) {
+          await client.query(
+            `INSERT INTO TradeHistory (timestamp, exchange_trade_id, exchange_order_id, pair, side, price, amount, fee_cost, fee_currency, realized_pnl_usd)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (exchange_trade_id) DO NOTHING`,
+            [
+              new Date(trade.timestamp),
+              trade.id,
+              trade.order,
+              trade.symbol,
+              trade.side,
+              trade.price.toString(),
+              trade.amount.toString(),
+              trade.fee.cost.toString(),
+              trade.fee.currency,
+              null, // realized_pnl_usd будет рассчитан позже
+            ],
+          );
+        }
+      }
+
+      // Шаг 3: Реконструкция позиции из истории
+      const reconstructedPosition = await this._reconstructPositionFromHistory(pair, client);
+
+      if (!reconstructedPosition) {
+        this.logger.info(
+          `[${pair}] После реконструкции позиция закрыта (totalAmount <= 0). Восстановление не требуется.`,
+        );
+        return;
+      }
+
+      // Шаг 4: Вставляем восстановленную позицию
+      this.logger.info(
+        `[${pair}] Восстанавливаем позицию: side=${reconstructedPosition.side}, amount=${reconstructedPosition.amount}, avgPrice=${reconstructedPosition.average_entry_price}`,
+      );
+
+      await client.query(
+        `INSERT INTO ActivePositions (pair, side, amount, average_entry_price, total_fee_cost, stop_loss_price)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (pair) DO UPDATE SET
+           side = EXCLUDED.side,
+           amount = EXCLUDED.amount,
+           average_entry_price = EXCLUDED.average_entry_price,
+           total_fee_cost = EXCLUDED.total_fee_cost,
+           stop_loss_price = EXCLUDED.stop_loss_price`,
+        [
+          pair,
+          reconstructedPosition.side,
+          reconstructedPosition.amount.toString(),
+          reconstructedPosition.average_entry_price.toString(),
+          reconstructedPosition.total_fee_cost.toString(),
+          null, // stop_loss_price = NULL для восстановленных позиций
+        ],
+      );
+
+      this.logger.info(`[${pair}] Позиция успешно восстановлена в БД.`);
+    });
+  }
+
+  /**
+   * Вспомогательный метод для реконструкции позиции из истории сделок
+   */
+  private async _reconstructPositionFromHistory(
+    pair: string,
+    client: PoolClient,
+  ): Promise<ReconstructedPosition | null> {
+    const historyResult = await client.query('SELECT * FROM TradeHistory WHERE pair = $1 ORDER BY timestamp ASC', [
+      pair,
+    ]);
+
+    const historyTrades = historyResult.rows as unknown[] as DbTrade[];
+
+    if (historyTrades.length === 0) {
+      return null;
+    }
+
+    // Используем decimal.js для точных расчетов
+    let totalAmount = new DecimalConstructor(0);
+    let totalCost = new DecimalConstructor(0);
+    let totalFeeCost = new DecimalConstructor(0);
+
+    for (const trade of historyTrades) {
+      const amount = new DecimalConstructor(trade.amount);
+      const price = new DecimalConstructor(trade.price);
+      const feeCost = new DecimalConstructor(trade.fee_cost);
+
+      if (trade.side === 'buy') {
+        totalAmount = totalAmount.plus(amount);
+        totalCost = totalCost.plus(amount.mul(price));
+      } else {
+        // sell - уменьшаем позицию
+        totalAmount = totalAmount.minus(amount);
+        totalCost = totalCost.minus(amount.mul(price));
+      }
+
+      totalFeeCost = totalFeeCost.plus(feeCost);
+    }
+
+    // Если позиция закрыта (totalAmount <= 0), возвращаем null
+    if (totalAmount.lessThanOrEqualTo(0)) {
+      return null;
+    }
+
+    // Определяем сторону позиции
+    const side: 'long' | 'short' = totalAmount.greaterThan(0) ? 'long' : 'short';
+
+    // Рассчитываем среднюю цену входа
+    const averageEntryPrice = totalCost.abs().div(totalAmount.abs());
+
+    return {
+      side,
+      amount: totalAmount.abs() as DecimalValue,
+      average_entry_price: averageEntryPrice as DecimalValue,
+      total_fee_cost: totalFeeCost as DecimalValue,
+    };
+  }
+
+  /**
+   * Извлекает базовый актив из торговой пары (e.g., 'BTC' из 'BTC/USDT')
+   */
+  private getBaseAsset(pair: string): string {
+    const parts = pair.split('/');
+    if (parts.length !== 2) {
+      throw new Error(`Invalid pair format: ${pair}`);
+    }
+    const baseAsset = parts[0];
+    if (!baseAsset || baseAsset.length === 0) {
+      throw new Error(`Invalid pair format: ${pair}`);
+    }
+    return baseAsset;
   }
 
   // (STUB - Задача 5.1.2: Логика Сверки - Исполнение OPEN_LIMIT)

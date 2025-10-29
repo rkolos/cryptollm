@@ -133,6 +133,8 @@ export class TAEngineService {
           fastPeriod: 12,
           slowPeriod: 26,
           signalPeriod: 9,
+          SimpleMAOscillator: false,
+          SimpleMASignal: false,
         });
         if (macdResult.length > 0) {
           const lastMacd = macdResult[macdResult.length - 1];

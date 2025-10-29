@@ -79,8 +79,10 @@ export class ProductionExchangeService implements IExchangeService {
 
   private toDecimal(value: number | string | undefined | null): DecimalValue {
     if (value === undefined || value === null) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return new (Decimal as any)(0);
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return new (Decimal as any)(String(value));
   }
 
@@ -125,8 +127,16 @@ export class ProductionExchangeService implements IExchangeService {
       const orderBook = await this.ccxtExchange.fetchOrderBook(symbol, limit);
       return {
         symbol: String(orderBook.symbol || ''),
-        bids: orderBook.bids.map((bid: any) => [this.toDecimal(bid[0]), this.toDecimal(bid[1])]),
-        asks: orderBook.asks.map((ask: any) => [this.toDecimal(ask[0]), this.toDecimal(ask[1])]),
+        bids: orderBook.bids.map((bid: unknown) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const [price, amount] = bid as any;
+          return [this.toDecimal(price), this.toDecimal(amount)];
+        }),
+        asks: orderBook.asks.map((ask: unknown) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const [price, amount] = ask as any;
+          return [this.toDecimal(price), this.toDecimal(amount)];
+        }),
         timestamp: orderBook.timestamp,
       };
     });
@@ -240,7 +250,10 @@ export class ProductionExchangeService implements IExchangeService {
   public async fetchMyTrades(symbol?: string, since?: number, limit?: number): Promise<IDecimalTrade[]> {
     return await this.execute(async () => {
       const trades = await this.ccxtExchange.fetchMyTrades(symbol, since, limit);
-      return trades.map((trade: any) => ({
+      return trades.map((trade: unknown) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const t = trade as any;
+        return {
         id: String(trade.id || ''),
         order: trade.order ? String(trade.order) : '',
         symbol: String(trade.symbol || ''),

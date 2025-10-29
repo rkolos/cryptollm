@@ -1,5 +1,6 @@
 import Decimal from 'decimal.js';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const decimalInstance = new (Decimal as any)(0);
 export type DecimalValue = typeof decimalInstance;
 

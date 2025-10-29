@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NotificationService } from '../NotificationService.js';
 import { ConfigService } from '../ConfigService.js';
 import { DatabaseService } from '../DatabaseService.js';

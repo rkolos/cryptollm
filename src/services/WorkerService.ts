@@ -708,9 +708,11 @@ export class WorkerService {
       const fullEntryFeeDecimal = fullEntryFeeCostDecimal as any;
       // Пропорциональная доля комиссии входа: (close_amount / full_amount) * entry_fee
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const proportionalEntryFee = closeAmountDecimalForCalc
+      const proportionalEntryFeeResult = closeAmountDecimalForCalc
         .div(fullAmountDecimalForFeeCalc)
-        .mul(fullEntryFeeDecimal) as any;
+        .mul(fullEntryFeeDecimal);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const proportionalEntryFee = proportionalEntryFeeResult as any as DecimalValue;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const closeFeeDecimal = closeFeeCostDecimal as any;
 

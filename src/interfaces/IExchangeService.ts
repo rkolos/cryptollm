@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 
-export type DecimalValue = InstanceType<typeof Decimal>;
+const DecimalConstructor = Decimal as new (value: number | string) => Decimal;
+export type DecimalValue = ReturnType<typeof DecimalConstructor>;
 
 export interface IDecimalOHLCV {
   timestamp: number;

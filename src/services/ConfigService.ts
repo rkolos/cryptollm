@@ -22,6 +22,7 @@ const configSchema = z.object({
   RISK_MAX_PER_TRADE_PERCENT: z.coerce.number().positive(),
   RISK_MAX_TOTAL_PORTFOLIO_PERCENT: z.coerce.number().positive(),
   RISK_DESIRED_RR_RATIO: z.coerce.number().positive(),
+  DRY_RUN_INITIAL_USDT: z.coerce.number().positive().optional(),
 });
 
 type AppConfig = z.infer<typeof configSchema>;
@@ -118,5 +119,9 @@ export class ConfigService {
       maxTotalPortfolioRiskPercent: this.config.RISK_MAX_TOTAL_PORTFOLIO_PERCENT,
       desiredRiskRewardRatio: this.config.RISK_DESIRED_RR_RATIO,
     };
+  }
+
+  public getDryRunInitialBalance(): number {
+    return this.config.DRY_RUN_INITIAL_USDT ?? 10000;
   }
 }

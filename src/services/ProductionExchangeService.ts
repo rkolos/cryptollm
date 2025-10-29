@@ -79,9 +79,9 @@ export class ProductionExchangeService implements IExchangeService {
 
   private toDecimal(value: number | string | undefined | null): DecimalValue {
     if (value === undefined || value === null) {
-      return new Decimal(0);
+      return new (Decimal as any)(0);
     }
-    return new Decimal(String(value));
+    return new (Decimal as any)(String(value));
   }
 
   public async loadMarkets(): Promise<void> {

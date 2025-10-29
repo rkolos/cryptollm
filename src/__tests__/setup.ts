@@ -25,4 +25,3 @@ beforeAll(() => {
   ConfigService.load();
   LoggingService.initialize();
 });
-

@@ -92,4 +92,3 @@ export function createMockExchangeService(): IExchangeService {
 
   return mockService;
 }
-

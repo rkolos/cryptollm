@@ -35,7 +35,13 @@ describe('ValidatorService', () => {
       });
       const exchangeRules = MockDataFactory.createMarketRules();
 
-      const result = validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
+      const result = validatorService.validateDecision(
+        decision,
+        accountState,
+        strategyContext,
+        marketData,
+        exchangeRules,
+      );
 
       expect(result).toBeDefined();
       expect(result.roundedAmountCoin).toBeDefined();
@@ -148,7 +154,13 @@ describe('ValidatorService', () => {
       });
       const exchangeRules = MockDataFactory.createMarketRules();
 
-      const result = validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
+      const result = validatorService.validateDecision(
+        decision,
+        accountState,
+        strategyContext,
+        marketData,
+        exchangeRules,
+      );
 
       expect(result).toBeDefined();
       expect(result.roundedAmountCoin).toBeDefined();
@@ -195,7 +207,13 @@ describe('ValidatorService', () => {
       });
       const exchangeRules = MockDataFactory.createMarketRules();
 
-      const result = validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
+      const result = validatorService.validateDecision(
+        decision,
+        accountState,
+        strategyContext,
+        marketData,
+        exchangeRules,
+      );
 
       expect(result).toBeDefined();
       expect(result.roundedEntryPrice.toString()).toBe('49000');
@@ -243,7 +261,13 @@ describe('ValidatorService', () => {
       });
       const exchangeRules = MockDataFactory.createMarketRules();
 
-      const result = validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
+      const result = validatorService.validateDecision(
+        decision,
+        accountState,
+        strategyContext,
+        marketData,
+        exchangeRules,
+      );
 
       // Проверяем расчет: 100 USDT риска / 2000 USDT дистанции = 0.05 BTC
       expect(result.usdAtRisk.toString()).toBe('100');
@@ -296,7 +320,13 @@ describe('ValidatorService', () => {
       const marketData = MockDataFactory.createMarketData();
       const exchangeRules = MockDataFactory.createMarketRules();
 
-      const result = validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
+      const result = validatorService.validateDecision(
+        decision,
+        accountState,
+        strategyContext,
+        marketData,
+        exchangeRules,
+      );
 
       expect(result).toBeDefined();
     });
@@ -359,7 +389,13 @@ describe('ValidatorService', () => {
       const marketData = MockDataFactory.createMarketData();
       const exchangeRules = MockDataFactory.createMarketRules();
 
-      const result = validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
+      const result = validatorService.validateDecision(
+        decision,
+        accountState,
+        strategyContext,
+        marketData,
+        exchangeRules,
+      );
 
       expect(result).toBeDefined();
     });
@@ -520,7 +556,13 @@ describe('ValidatorService', () => {
         minNotional: MockDataFactory.createDecimal(5), // Низкий минимум для теста
       });
 
-      const result = validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules);
+      const result = validatorService.validateDecision(
+        decision,
+        accountState,
+        strategyContext,
+        marketData,
+        exchangeRules,
+      );
 
       expect(result.roundedAmountCoin).toBeDefined();
       expect(result.roundedAmountUsd).toBeDefined();
@@ -531,4 +573,3 @@ describe('ValidatorService', () => {
     });
   });
 });
-

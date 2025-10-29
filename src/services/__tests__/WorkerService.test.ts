@@ -181,25 +181,27 @@ describe('WorkerService', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockExecutionService.createOrderWithRetry as any).mockReset();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mockExecutionService.createOrderWithRetry as any).mockImplementation(async (
-        _pair: string,
-        type: string,
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        _side: string,
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
-        _amount: any,
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
-        _price?: any,
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
-        _params?: any,
-      ) => {
-        callCount++;
-        if (type === 'market') {
-          return mockMarketOrder;
-        }
-        // Для stop_loss_limit или limit ордеров
-        return mockSlOrder;
-      });
+      (mockExecutionService.createOrderWithRetry as any).mockImplementation(
+        async (
+          _pair: string,
+          type: string,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          _side: string,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
+          _amount: any,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
+          _price?: any,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
+          _params?: any,
+        ) => {
+          callCount++;
+          if (type === 'market') {
+            return mockMarketOrder;
+          }
+          // Для stop_loss_limit или limit ордеров
+          return mockSlOrder;
+        },
+      );
 
       // Мокируем query для _updateDecisionLog (вызывается в начале и в конце)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -224,10 +226,7 @@ describe('WorkerService', () => {
       // Проверяем, что ордера были созданы (market + SL)
       expect(callCount).toBeGreaterThan(0); // Как минимум market ордер
       expect(mockEventBus.emitTradeExecuted).toHaveBeenCalledWith('BTC/USDT');
-      expect(mockNotificationService.sendAlert).toHaveBeenCalledWith(
-        expect.stringContaining('ИСПОЛНЕНО'),
-        true,
-      );
+      expect(mockNotificationService.sendAlert).toHaveBeenCalledWith(expect.stringContaining('ИСПОЛНЕНО'), true);
     });
   });
 
@@ -330,4 +329,3 @@ describe('WorkerService', () => {
     });
   });
 });
-

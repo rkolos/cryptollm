@@ -271,9 +271,7 @@ export class NotificationService {
       );
 
       // Получаем общее количество сделок
-      const totalTradesResult = await this.databaseService.query(
-        `SELECT COUNT(*) as total FROM TradeHistory`,
-      );
+      const totalTradesResult = await this.databaseService.query(`SELECT COUNT(*) as total FROM TradeHistory`);
 
       // Получаем общие комиссии
       const totalFeesResult = await this.databaseService.query(
@@ -287,12 +285,14 @@ export class NotificationService {
       const losses = parseInt(closedPositionsRow.losses || '0', 10);
       const totalRealizedPnl = new DecimalConstructor(closedPositionsRow.total_pnl || '0') as DecimalValue;
       const totalFees = new DecimalConstructor(totalFeesResult.rows[0].total_fees || '0') as DecimalValue;
-      const avgWin = closedPositions > 0 && wins > 0
-        ? (new DecimalConstructor(closedPositionsRow.avg_win || '0') as DecimalValue)
-        : (new DecimalConstructor('0') as DecimalValue);
-      const avgLoss = closedPositions > 0 && losses > 0
-        ? (new DecimalConstructor(closedPositionsRow.avg_loss || '0') as DecimalValue)
-        : (new DecimalConstructor('0') as DecimalValue);
+      const avgWin =
+        closedPositions > 0 && wins > 0
+          ? (new DecimalConstructor(closedPositionsRow.avg_win || '0') as DecimalValue)
+          : (new DecimalConstructor('0') as DecimalValue);
+      const avgLoss =
+        closedPositions > 0 && losses > 0
+          ? (new DecimalConstructor(closedPositionsRow.avg_loss || '0') as DecimalValue)
+          : (new DecimalConstructor('0') as DecimalValue);
       const winRate = closedPositions > 0 ? (wins / closedPositions) * 100 : 0;
 
       return {

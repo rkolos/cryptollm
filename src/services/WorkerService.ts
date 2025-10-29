@@ -11,7 +11,13 @@ import { AccountStateService } from './AccountStateService.js';
 import { ExchangeRulesService } from './ExchangeRulesService.js';
 import { ConfigService } from './ConfigService.js';
 import type { LLMDecision } from '../interfaces/ILLMTypes.js';
-import type { AccountState, MarketData, StrategyContext, CalculatedAmounts, DecimalValue } from '../interfaces/IValidatorTypes.js';
+import type {
+  AccountState,
+  MarketData,
+  StrategyContext,
+  CalculatedAmounts,
+  DecimalValue,
+} from '../interfaces/IValidatorTypes.js';
 import type { IDecimalOrder } from '../interfaces/IExchangeService.js';
 import { InsufficientFundsError } from '../errors/ExchangeErrors.js';
 import type winston from 'winston';

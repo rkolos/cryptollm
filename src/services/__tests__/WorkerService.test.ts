@@ -227,7 +227,13 @@ describe('WorkerService', () => {
       // Проверяем, что ордера были созданы (market + SL)
       expect(callCount).toBeGreaterThan(0); // Как минимум market ордер
       expect(mockEventBus.emitTradeExecuted).toHaveBeenCalledWith('BTC/USDT');
-      expect(mockNotificationService.sendAlert).toHaveBeenCalledWith(expect.stringContaining('ИСПОЛНЕНО'), true);
+      // Для OPEN_LONG вызывается sendTradingSummary вместо sendAlert
+      expect(mockNotificationService.sendTradingSummary).toHaveBeenCalledWith(
+        'OPEN_LONG',
+        'BTC/USDT',
+        expect.any(String),
+      );
+      expect(mockNotificationService.sendAlert).not.toHaveBeenCalled();
     });
   });
 

@@ -234,6 +234,7 @@ describe('WorkerService', () => {
   describe('execute - InsufficientFundsError handling', () => {
     it('должен обработать InsufficientFundsError и поставить бота на паузу', async () => {
       // ВАЖНО: Сбрасываем мок, чтобы убедиться, что предыдущий тест не влияет
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockValidatorService.validateDecision as any).mockReset();
 
       const decision = MockDataFactory.createLLMDecision({

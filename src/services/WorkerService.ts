@@ -169,6 +169,12 @@ export class WorkerService {
         case 'HOLD':
           // Ничего не делаем
           break;
+
+        default: {
+          // Защита от неожиданных значений action (TypeScript должен гарантировать exhaustiveness)
+          const exhaustiveCheck: never = decision.action;
+          throw new Error(`[${pair}] Неизвестный action: ${String(exhaustiveCheck)}`);
+        }
       }
 
       // Успех

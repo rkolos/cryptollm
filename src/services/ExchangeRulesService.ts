@@ -55,19 +55,29 @@ export class ExchangeRulesService {
     const taker = (fees.taker as number | string | undefined) ?? 0.001;
     const precision = (market.precision as Record<string, unknown>) || {};
 
-    const minNotional = cost.min !== undefined && cost.min !== null ? new Decimal(String(cost.min)) : new Decimal(10);
+    const minNotional =
+      cost.min !== undefined && cost.min !== null
+        ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          new (Decimal as any)(String(cost.min))
+        : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          new (Decimal as any)(10);
 
-    const takerFeeValue = new Decimal(String(taker));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const takerFeeValue = new (Decimal as any)(String(taker));
 
     const amountPrecision =
       precision.amount !== undefined && precision.amount !== null
-        ? new Decimal(String(precision.amount))
-        : new Decimal('0.00000001');
+        ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          new (Decimal as any)(String(precision.amount))
+        : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          new (Decimal as any)('0.00000001');
 
     const pricePrecision =
       precision.price !== undefined && precision.price !== null
-        ? new Decimal(String(precision.price))
-        : new Decimal('0.01');
+        ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          new (Decimal as any)(String(precision.price))
+        : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          new (Decimal as any)('0.01');
 
     return {
       minNotional,

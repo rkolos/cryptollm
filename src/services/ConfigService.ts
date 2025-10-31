@@ -126,7 +126,8 @@ export class ConfigService {
   }
 
   public getSlowCycleIntervalMs(): number {
-    // Дефолтное значение 60 секунд
-    return 60000;
+    // Дефолтное значение 10 минут (600000 мс)
+    // Уменьшено частоты проверки триггеров для снижения нагрузки на API
+    return 600000;
   }
 }

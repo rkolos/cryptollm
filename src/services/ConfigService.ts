@@ -150,14 +150,6 @@ export class ConfigService {
   }
 
   public getSlowCycleIntervalMs(): number {
-    // Для демо-счетов используем более частую проверку для быстрого тестирования
-    const isDemoAccount = this.config.APP_MODE === 'testnet' || this.config.APP_MODE === 'dry_run';
-
-    if (isDemoAccount) {
-      // Проверка каждую минуту для максимальной активности
-      return 60000; // 1 минута
-    }
-
     // Дефолтное значение 10 минут (600000 мс)
     // Уменьшено частоты проверки триггеров для снижения нагрузки на API
     return 600000;

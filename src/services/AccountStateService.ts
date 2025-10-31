@@ -270,9 +270,25 @@ export class AccountStateService {
             // PostgreSQL возвращает JSONB как объект, а не строку
             const triggerConditionsValue = row.trigger_conditions_json;
             if (typeof triggerConditionsValue === 'string') {
+              // Проверяем, что это не "[object Object]"
+              if (triggerConditionsValue === '[object Object]') {
+                this.logger.error(
+                  `Ошибка: trigger_conditions_json для пары ${pair} преобразован в "[object Object]". Данные повреждены.`,
+                );
+                continue;
+              }
               triggerConditions = JSON.parse(triggerConditionsValue) as LLMTriggerCondition[];
             } else if (Array.isArray(triggerConditionsValue)) {
               triggerConditions = triggerConditionsValue as LLMTriggerCondition[];
+            } else if (triggerConditionsValue && typeof triggerConditionsValue === 'object') {
+              // Если это объект (но не массив), пытаемся использовать JSON.stringify + parse
+              try {
+                const jsonString = JSON.stringify(triggerConditionsValue);
+                triggerConditions = JSON.parse(jsonString) as LLMTriggerCondition[];
+              } catch (stringifyError) {
+                this.logger.error(`Ошибка сериализации trigger_conditions_json для пары ${pair}:`, stringifyError);
+                continue;
+              }
             } else {
               this.logger.warn(
                 `Неожиданный тип trigger_conditions_json для пары ${pair}: ${typeof triggerConditionsValue}. Ожидается строка или массив.`,

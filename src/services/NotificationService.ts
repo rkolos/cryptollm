@@ -25,6 +25,8 @@ export class NotificationService {
   private isEnabled: boolean = false;
   private readonly messageQueue: Array<() => Promise<void>> = [];
   private isProcessingQueue: boolean = false;
+  private lastMessageTime: number = 0;
+  private readonly minDelayBetweenMessages: number = 2000; // Минимум 2 секунды между сообщениями
 
   private constructor(configService: ConfigService) {
     this.configService = configService;
@@ -184,7 +186,7 @@ export class NotificationService {
           for (let i = 0; i < messageParts.length; i++) {
             const part = messageParts[i];
             const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
-            await this.bot.sendMessage(this.chatId, part + partNumber, {
+            await this._sendMessageWithRetry(this.chatId, part + partNumber, {
               parse_mode: 'MarkdownV2',
             });
             // Небольшая задержка между частями
@@ -207,6 +209,97 @@ export class NotificationService {
     this.processQueue().catch((error) => {
       this.logger.error('Error starting processQueue:', error);
     });
+  }
+
+  /**
+   * Извлечение времени ожидания из ошибки Telegram API (429 Too Many Requests)
+   */
+  private _extractRetryAfter(error: unknown): number {
+    // Пытаемся извлечь retry_after из различных мест структуры ошибки
+    if (error && typeof error === 'object') {
+      // Вариант 1: response.body.parameters.retry_after
+      if ('response' in error) {
+        const response = (error as { response?: { body?: { parameters?: { retry_after?: number } } } }).response;
+        if (response?.body?.parameters?.retry_after) {
+          return response.body.parameters.retry_after * 1000; // Конвертируем секунды в миллисекунды
+        }
+      }
+
+      // Вариант 2: response.parameters.retry_after
+      if ('response' in error) {
+        const response = (error as { response?: { parameters?: { retry_after?: number } } }).response;
+        if (response?.parameters?.retry_after) {
+          return response.parameters.retry_after * 1000;
+        }
+      }
+
+      // Вариант 3: Извлекаем из текста сообщения "retry after X"
+      if ('message' in error && typeof (error as { message?: string }).message === 'string') {
+        const message = (error as { message: string }).message;
+        const match = message.match(/retry after (\d+)/i);
+        if (match && match[1]) {
+          const seconds = parseInt(match[1], 10);
+          if (!isNaN(seconds)) {
+            return seconds * 1000;
+          }
+        }
+      }
+    }
+    // Если не удалось извлечь время, используем стандартную задержку
+    return this.minDelayBetweenMessages * 2; // 4 секунды по умолчанию
+  }
+
+  /**
+   * Отправка сообщения с обработкой ошибок rate limiting
+   */
+  private async _sendMessageWithRetry(
+    chatId: string,
+    text: string,
+    options: { parse_mode?: 'MarkdownV2' | 'HTML' | 'Markdown' },
+  ): Promise<void> {
+    const maxRetries = 3;
+    let retryCount = 0;
+
+    while (retryCount < maxRetries) {
+      try {
+        // Убеждаемся, что прошло достаточно времени с последнего сообщения
+        const timeSinceLastMessage = Date.now() - this.lastMessageTime;
+        if (timeSinceLastMessage < this.minDelayBetweenMessages) {
+          const waitTime = this.minDelayBetweenMessages - timeSinceLastMessage;
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+        }
+
+        await this.bot!.sendMessage(chatId, text, options);
+        this.lastMessageTime = Date.now();
+        return; // Успешно отправлено
+      } catch (error) {
+        // Проверяем, является ли это ошибкой rate limiting
+        if (
+          error &&
+          typeof error === 'object' &&
+          'code' in error &&
+          (error as { code?: string }).code === 'ETELEGRAM' &&
+          'response' in error
+        ) {
+          const response = (error as { response?: { statusCode?: number } }).response;
+          if (response?.statusCode === 429) {
+            const retryAfter = this._extractRetryAfter(error);
+            this.logger.warn(
+              `Telegram rate limit hit. Waiting ${retryAfter / 1000} seconds before retry (attempt ${retryCount + 1}/${maxRetries})`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, retryAfter));
+            retryCount++;
+            continue;
+          }
+        }
+
+        // Для других ошибок пробрасываем исключение
+        throw error;
+      }
+    }
+
+    // Если все попытки исчерпаны, логируем ошибку
+    this.logger.error('Failed to send message after all retries due to rate limiting');
   }
 
   /**
@@ -234,9 +327,13 @@ export class NotificationService {
           // Продолжаем обработку других задач
         }
 
-        // Пауза для избежания Rate Limit (~1100ms между сообщениями)
+        // Пауза для избежания Rate Limit (минимум 2 секунды между сообщениями)
         if (this.messageQueue.length > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 1100));
+          const timeSinceLastMessage = Date.now() - this.lastMessageTime;
+          if (timeSinceLastMessage < this.minDelayBetweenMessages) {
+            const waitTime = this.minDelayBetweenMessages - timeSinceLastMessage;
+            await new Promise((resolve) => setTimeout(resolve, waitTime));
+          }
         }
       }
     } finally {
@@ -348,7 +445,7 @@ export class NotificationService {
           for (let i = 0; i < messageParts.length; i++) {
             const part = messageParts[i];
             const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
-            await this.bot.sendMessage(this.chatId, part + partNumber, {
+            await this._sendMessageWithRetry(this.chatId, part + partNumber, {
               parse_mode: 'MarkdownV2',
             });
             // Небольшая задержка между частями
@@ -545,7 +642,7 @@ export class NotificationService {
           for (let i = 0; i < messageParts.length; i++) {
             const part = messageParts[i];
             const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
-            await this.bot.sendMessage(this.chatId, part + partNumber, {
+            await this._sendMessageWithRetry(this.chatId, part + partNumber, {
               parse_mode: 'MarkdownV2',
             });
             // Небольшая задержка между частями

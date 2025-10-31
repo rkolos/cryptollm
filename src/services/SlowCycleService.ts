@@ -205,9 +205,25 @@ export class SlowCycleService {
           try {
             // PostgreSQL возвращает JSONB как объект, а не строку
             if (typeof triggerConditionsJson === 'string') {
+              // Проверяем, что это не "[object Object]"
+              if (triggerConditionsJson === '[object Object]') {
+                this.logger.error(
+                  `(SlowCycle) [${pair}] Ошибка: trigger_conditions_json преобразован в "[object Object]". Данные повреждены.`,
+                );
+                continue;
+              }
               conditions = JSON.parse(triggerConditionsJson) as LLMTriggerCondition[];
             } else if (Array.isArray(triggerConditionsJson)) {
               conditions = triggerConditionsJson as LLMTriggerCondition[];
+            } else if (triggerConditionsJson && typeof triggerConditionsJson === 'object') {
+              // Если это объект (но не массив), пытаемся использовать JSON.stringify + parse
+              try {
+                const jsonString = JSON.stringify(triggerConditionsJson);
+                conditions = JSON.parse(jsonString) as LLMTriggerCondition[];
+              } catch (stringifyError) {
+                this.logger.error(`(SlowCycle) [${pair}] Ошибка сериализации trigger_conditions_json:`, stringifyError);
+                continue;
+              }
             } else {
               this.logger.error(
                 `(SlowCycle) [${pair}] Неожиданный тип trigger_conditions_json: ${typeof triggerConditionsJson}`,

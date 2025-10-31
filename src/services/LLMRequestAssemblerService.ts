@@ -25,6 +25,7 @@ interface PromptCache {
   systemPrompt: string;
   userTemplate: string;
   outputSchema: string;
+  finalQuestionTemplate: string;
 }
 
 interface LLMRequestPayload {
@@ -94,16 +95,18 @@ export class LLMRequestAssemblerService {
   public async initialize(): Promise<void> {
     this.logger.info('Loading prompts from disk...');
     try {
-      const [systemPrompt, userTemplate, outputSchema] = await Promise.all([
+      const [systemPrompt, userTemplate, outputSchema, finalQuestionTemplate] = await Promise.all([
         readFile(join(PROMPT_DIR_V1, 'system.md'), 'utf-8'),
         readFile(join(PROMPT_DIR_V1, 'user_template.md'), 'utf-8'),
         readFile(join(PROMPT_DIR_V1, 'output_schema.md'), 'utf-8'),
+        readFile(join(PROMPT_DIR_V1, 'final_question_template.md'), 'utf-8'),
       ]);
 
       this.promptCache = {
         systemPrompt,
         userTemplate,
         outputSchema,
+        finalQuestionTemplate,
       };
 
       this.logger.info('Prompts loaded and cached successfully.');
@@ -436,7 +439,7 @@ export class LLMRequestAssemblerService {
     const accountStateSerialized = {
       total_portfolio_value_usdt: this.toNumber(accountState.total_portfolio_value_usdt),
       available_quote_balance: this.toNumber(accountState.available_quote_balance),
-      max_position_size_usdt: maxPositionSizeUsdt, // Максимальный размер позиции в USDT (для Long)
+      max_position_size_usdt: maxPositionSizeUsdt, // КРИТИЧЕСКИ ВАЖНО: Максимальный размер позиции в USDT (НЕ ПРЕВЫШАЙ!)
       assets: accountState.assets.map((asset) => ({
         asset: asset.asset,
         total: this.toNumber(asset.total),
@@ -451,6 +454,11 @@ export class LLMRequestAssemblerService {
       })),
       open_orders: accountState.open_orders,
     };
+
+    // Логируем критически важную информацию о балансе для отладки
+    this.logger.debug(
+      `[${triggeredPair}] Account state for LLM: available_balance=${accountStateSerialized.available_quote_balance}, max_position_size_usdt=${accountStateSerialized.max_position_size_usdt}`,
+    );
 
     // Формирование strategy_context
     const strategyContextSerialized = {
@@ -510,9 +518,13 @@ export class LLMRequestAssemblerService {
     // Заменяем остальные плейсхолдеры
     userPrompt = userPrompt.replace('{{TRIGGERED_PAIR}}', triggeredPair);
 
-    // Формируем FINAL_QUESTION из шаблона
-    const finalQuestionTemplate = `Триггер сработал для \`${triggeredPair}\`.\n\n**Причина вызова:** \`${reason}\`. **Текущий макро-контекст:** \`${macroContext.fear_and_greed_text || 'N/A'}\` (Индекс: \`${macroContext.fear_and_greed_index || 'N/A'}\`).\n\nПроанализируй \`${triggeredPair}\` (включая \`market_data\` и \`technical_analysis\`) в контексте всего портфеля (\`account_state\`).\n\nДействуй в рамках своей роли (из \`system prompt\`) и \`risk_rules\` (из \`strategy_context\`).\n\nПрими торговое решение на основе предоставленных данных. Помни о необходимости обоснования каждого решения в поле \`justification\` с использованием цепочки размышлений (Chain-of-Thought).\n\nСформулируй свой анализ в поле \`justification\` и верни JSON-ответ, строго соответствующий указанной схеме.`;
-    userPrompt = userPrompt.replace('{{FINAL_QUESTION}}', finalQuestionTemplate);
+    // Формируем FINAL_QUESTION из шаблона с подстановкой значений
+    const finalQuestion = this.promptCache.finalQuestionTemplate
+      .replace(/{{TRIGGERED_PAIR}}/g, triggeredPair)
+      .replace(/{{TRIGGER_REASON}}/g, reason)
+      .replace(/{{MACRO_TEXT}}/g, macroContext.fear_and_greed_text || 'N/A')
+      .replace(/{{MACRO_VALUE}}/g, macroContext.fear_and_greed_index?.toString() || 'N/A');
+    userPrompt = userPrompt.replace('{{FINAL_QUESTION}}', finalQuestion);
 
     // Сериализуем JSON данные
     const strategyContextJson = this.safeJsonStringify(llmRequestData);

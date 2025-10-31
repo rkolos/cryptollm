@@ -81,10 +81,53 @@ export class ProductionLLMService implements ILLMService {
       const parseResult = llmResponseSchema.safeParse(dataToValidate);
 
       if (!parseResult.success) {
-        this.logger.error('LLM Response validation FAILED.', {
-          errors: parseResult.error.issues,
-          rawData: dataToValidate,
+        // Форматируем ошибки для лучшей читаемости
+        const formattedErrors = parseResult.error.issues.map((issue) => {
+          const base = {
+            path: issue.path.join('.'),
+            message: issue.message,
+            code: issue.code,
+          };
+          // Добавляем информацию о типе только для ошибок invalid_type
+          if (issue.code === 'invalid_type') {
+            const invalidTypeIssue = issue as { received?: unknown; expected?: string };
+            return {
+              ...base,
+              received: typeof invalidTypeIssue.received,
+              expected: invalidTypeIssue.expected,
+            };
+          }
+          return base;
         });
+
+        // Ограничиваем размер rawData для логирования (первые 1000 символов)
+        const rawDataString = JSON.stringify(dataToValidate, null, 2);
+        const truncatedRawData =
+          rawDataString.length > 1000
+            ? rawDataString.substring(0, 1000) + `\n... (truncated, total length: ${rawDataString.length})`
+            : rawDataString;
+
+        this.logger.error('LLM Response validation FAILED.', {
+          errors: formattedErrors,
+          errorCount: parseResult.error.issues.length,
+          rawDataPreview: truncatedRawData,
+        });
+
+        // Логируем каждую ошибку отдельно для лучшей читаемости
+        parseResult.error.issues.forEach((issue, index) => {
+          const errorInfo: Record<string, unknown> = {
+            path: issue.path.join('.') || 'root',
+            message: issue.message,
+            code: issue.code,
+          };
+          if (issue.code === 'invalid_type') {
+            const invalidTypeIssue = issue as { received?: unknown; expected?: string };
+            errorInfo.received = typeof invalidTypeIssue.received;
+            errorInfo.expected = invalidTypeIssue.expected;
+          }
+          this.logger.error(`Validation error ${index + 1}/${parseResult.error.issues.length}:`, errorInfo);
+        });
+
         throw new LLMResponseFormatError('LLM response format is invalid.', parseResult.error.issues, dataToValidate);
       }
 

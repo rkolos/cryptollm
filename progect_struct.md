@@ -18,7 +18,7 @@
 
 - **Задача 1.3: Модуль Конфигурации (ConfigService)**
   - Описание: Создание строго типизированного `ConfigService` (Singleton), который читает `.env` файлы.
-  - Функционал: Загрузка `APP_MODE` ('production', 'testnet', 'dry_run'). Загрузка `BINANCE_API_KEY/SECRET`, `DB_HOST/USER/PASS`, `WATCHLIST`, `LLM_API_URL` (для Mock-сервера), `LLM_API_KEY` (для Production). **(Добавлено)** Загрузка `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Загрузка `strategy_context` (Роль, Стиль) и `risk_rules` (default_risk_percent, max_allowed_risk_percent, max_total_portfolio_risk_percent, desired_risk_reward_ratio) из Категории 4. Валидация переменных окружения при старте.
+  - Функционал: Загрузка `APP_MODE` ('production', 'testnet', 'dry_run'). Загрузка `BINANCE_API_KEY/SECRET`, `DB_HOST/USER/PASS`, `WATCHLIST`, `LLM_API_URL` (для Mock-сервера), `LLM_API_KEY` (для Production).  Загрузка `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Загрузка `strategy_context` (Роль, Стиль) и `risk_rules` (default_risk_percent, max_allowed_risk_percent, max_total_portfolio_risk_percent, desired_risk_reward_ratio) из Категории 4. Валидация переменных окружения при старте.
 
 - **Задача 1.4: Система Логирования (LoggingService)**
   - Описание: Настройка `winston`. Создание `LoggingService` (Singleton).
@@ -34,7 +34,7 @@
 
 - **Задача 2.1: Проектирование Схемы БД (Schema Design)**
   - Описание: Написание DDL-скрипта (`.sql`) для создания всех таблиц.
-  - Функционал: Таблицы `ActivePositions`, `ActiveOrders`, `TSL_State`, `LLM_Triggers`, `TradeHistory`. **Критично:** Использование `NUMERIC` или `DECIMAL` для всех цен, сумм и PnL. **(Добавлено)** Таблица `ActiveOrders` должна включать `nullable` поля: `target_stop_loss_price`, `target_take_profit_price`, `target_trailing_stop_json`. Эти поля _обязательны_ для ордеров типа `OPEN_LIMIT`.
+  - Функционал: Таблицы `ActivePositions`, `ActiveOrders`, `TSL_State`, `LLM_Triggers`, `TradeHistory`. **Критично:** Использование `NUMERIC` или `DECIMAL` для всех цен, сумм и PnL.  Таблица `ActiveOrders` должна включать `nullable` поля: `target_stop_loss_price`, `target_take_profit_price`, `target_trailing_stop_json`. Эти поля _обязательны_ для ордеров типа `OPEN_LIMIT`.
 
 - **Задача 2.4 : Таблица Аудита (LLM_Decision_Log)**
   - Описание: Проектирование и добавление в миграцию (2.2) таблицы для полного "черного ящика" (журнала аудита) каждого вызова LLM.
@@ -46,7 +46,7 @@
 
 - **Задача 2.3: Сервис-обертка для СУБД (DatabaseService)**
   - Описание: Создание `DatabaseService` (Singleton) для инкапсуляции работы с `pg.Pool`.
-  - Функционал: Управление `pg.Pool`. Методы `query()`, `getClient()`. **Критично:** Создание helper-функции `executeInTransaction(callback)` для атомарного выполнения операций (как требуется для `Worker` и `SyncEngine`). **(Добавлено)** Метод `async closePool()` для Graceful Shutdown.
+  - Функционал: Управление `pg.Pool`. Методы `query()`, `getClient()`. **Критично:** Создание helper-функции `executeInTransaction(callback)` для атомарного выполнения операций (как требуется для `Worker` и `SyncEngine`).  Метод `async closePool()` для Graceful Shutdown.
 
 ### Эпик 3: 🔌 Core-Сервисы и Клиенты (Core Services & Clients)
 
@@ -54,11 +54,11 @@
 
 - **Задача 3.1: Клиент Биржи (ExchangeService)**
   - Описание: Создание `ExchangeService` (Singleton) как типизированной обертки над `ccxt`.
-  - Функционал: Инициализация `ccxt.binance()` (в режиме Spot). Централизованная обработка ошибок `ccxt` (`RateLimitError`, `NetworkError` и т.д.). **(Добавлено)** Метод `async close()` для закрытия WS-соединений.
+  - Функционал: Инициализация `ccxt.binance()` (в режиме Spot). Централизованная обработка ошибок `ccxt` (`RateLimitError`, `NetworkError` и т.д.).  Метод `async close()` для закрытия WS-соединений.
 
 - **Задача 3.2: Загрузчик Правил Биржи (ExchangeRulesLoader)**
   - Описание: Реализация функции `loadExchangeRules` (раздел A.1 из `about.md`).
-  - Функционал: Вызов `ccxt.loadMarkets()`. Парсинг и кэширование `limits.cost.min` (`minNotional`), `taker` (комиссия). **(Добавлено)** **Критично:** Парсинг и кэширование `precision.amount` (точность количества) и `precision.price` (размер тика) для каждой пары.
+  - Функционал: Вызов `ccxt.loadMarkets()`. Парсинг и кэширование `limits.cost.min` (`minNotional`), `taker` (комиссия).  **Критично:** Парсинг и кэширование `precision.amount` (точность количества) и `precision.price` (размер тика) для каждой пары.
 
 - **Задача 3.3: Mock-Клиент LLM (MockLLMService)**
   - Описание: Создание "заглушки" (`MockLLMService`), которая имитирует API LLM (согласно "Дипсик").
@@ -130,7 +130,7 @@
 
 - **Задача 9.1: Менеджер "Актеров" (PairActorManagerService)**
   - Описание: Создание Singleton-сервиса, который управляет `Promise`\-очередями (сериализаторами) для каждой торговой пары.
-  - Функционал: `private promiseQueues = new Map<string, Promise<any>>()`. Метод `async execute<T>(pair: string, task: () => Promise<T>): Promise<T>`. Логика `execute` (сериализация `task` в цепочку `Promise`). Использование `.catch(() => {})` в цепочке `Promise` для предотвращения "сломанной" цепочки. **(Добавлено)** Метод `async waitForAllQueuesToSettle(timeout: number)` (использует `Promise.allSettled()` на `Map.values()` с `Promise.race()` для таймаута).
+  - Функционал: `private promiseQueues = new Map<string, Promise<any>>()`. Метод `async execute<T>(pair: string, task: () => Promise<T>): Promise<T>`. Логика `execute` (сериализация `task` в цепочку `Promise`). Использование `.catch(() => {})` в цепочке `Promise` для предотвращения "сломанной" цепочки.  Метод `async waitForAllQueuesToSettle(timeout: number)` (использует `Promise.allSettled()` на `Map.values()` с `Promise.race()` для таймаута).
 
 - **Задача 9.2: Внедрение в "Медленный Цикл" (SlowCycle Integration)**
   - Описание: Модификация `SyncEngine` (5.1, 5.1.1, 5.1.2) и `StopLossJanitor` (5.2.1) для использования `PairActorManagerService`.
@@ -198,7 +198,7 @@
 
 - **Задача 4.5: Сборщик Состояния Портфеля (AccountStateService)**
   - Описание: Реализация `fetchFullAccountState()` (Категория 3). Создание сервиса, который кэширует `globalAccountState` (in-memory) и отвечает за его обновление.
-  - Функционал: Агрегация данных из `ExchangeService.fetchBalance()`, `DB.query('SELECT * FROM ActivePositions')`, `DB.query('SELECT * FROM ActiveOrders')`. Расчет `total_portfolio_value_usdt` (с `decimal.js`). **(Добавлено)** Добавление метода `async refreshNow()` (который выполняет всю логику сбора) и `getAccountState()` (который возвращает кэш).
+  - Функционал: Агрегация данных из `ExchangeService.fetchBalance()`, `DB.query('SELECT * FROM ActivePositions')`, `DB.query('SELECT * FROM ActiveOrders')`. Расчет `total_portfolio_value_usdt` (с `decimal.js`).  Добавление метода `async refreshNow()` (который выполняет всю логику сбора) и `getAccountState()` (который возвращает кэш).
 
 - **Задача 4.5.1 : Немедленная Инвалидация Кэша (Cache Invalidation)**
   - Описание: Подписка `AccountStateService` на событие `trade_executed` от `WorkerService`.
@@ -206,11 +206,11 @@
 
 - **Задача 1.5 / 3.6: Сервис Уведомлений (NotificationService)**
   - Описание: Создание Singleton-сервиса для отправки PUSH-уведомлений (e.g., Telegram-бот) о штатных и критических событиях.
-  - Функционал: `async sendAlert(message: string, includeAccountState: boolean = false)`. Читает `TELEGRAM_BOT_TOKEN/CHAT_ID` из `ConfigService`. **(Добавлено)** Получает `AccountStateService` (через DI), чтобы `if (includeAccountState)` -> прикрепить к сообщению `globalAccountState` (балансы).
+  - Функционал: `async sendAlert(message: string, includeAccountState: boolean = false)`. Читает `TELEGRAM_BOT_TOKEN/CHAT_ID` из `ConfigService`.  Получает `AccountStateService` (через DI), чтобы `if (includeAccountState)` -> прикрепить к сообщению `globalAccountState` (балансы).
 
 - **Задача 4.6: Сборщик Запроса к LLM (LLMRequestAssemblerService)**
   - Описание: Сервис, который объединяет данные из всех других сервисов (4.1-4.5) и `ConfigService` (risk_rules) в единый JSON-запрос (Пример 1).
-  - Функционал: `async buildRequest(triggered_pair, reason)`. **(Добавлено)** 1. `const row = await DB.query('SELECT requested_data_json FROM LLM_Triggers WHERE pair = ?', [triggered_pair])`. 2. `const requestedData = JSON.parse(row.requested_data_json || '[]')`. 3. Вызов `TAEngineService.getAnalysis(ohlcv, requestedData)`. 4. Сборка итогового JSON.
+  - Функционал: `async buildRequest(triggered_pair, reason)`.  1. `const row = await DB.query('SELECT requested_data_json FROM LLM_Triggers WHERE pair = ?', [triggered_pair])`. 2. `const requestedData = JSON.parse(row.requested_data_json || '[]')`. 3. Вызов `TAEngineService.getAnalysis(ohlcv, requestedData)`. 4. Сборка итогового JSON.
 
 ### Эпик 7: 👷 "Исполнитель" (Worker Service)
 
@@ -222,7 +222,7 @@
 
 - **Задача 7.1: Диспетчер "Исполнителя" (WorkerService Dispatcher)**
   - Описание: Создание `WorkerService` с методом `execute(decision, llm_decision_log_id)`. Реализация (DI) для `GuaranteedOrderExecutionService` (7.0), `EventBus`, `NotificationService`, `GlobalStateService`. **(Требует Эпик 9)**.
-  - Функционал: `execute` _должен_ вызываться _внутри_ `PairActorManager` (см. 5.6 / 9.4). `let validationResult; try { ... } catch (validationError) {` (Логика обновления `LLM_Decision_Log` и `NotificationService.sendAlert`). `return; }` `try {` (Логика `switch (decision.action)` -> вызов `handle...`). `this.eventBus.emit('trade_executed')`. (Логика `NotificationService.sendAlert`). (Логика `UPDATE LLM_Decision_Log SET result = 'accepted'`). `} catch (executionError) {` **(Добавлено)** `if (executionError instanceof ccxt.InsufficientFundsError)` -> `await GlobalStateService.pause()` + `await NotificationService.sendAlert("FATAL: InsufficientFunds! Pausing bot.", true)` + `await AccountStateService.refreshNow()`. (Логика `UPDATE LLM_Decision_Log` и `NotificationService.sendAlert`). `}`
+  - Функционал: `execute` _должен_ вызываться _внутри_ `PairActorManager` (см. 5.6 / 9.4). `let validationResult; try { ... } catch (validationError) {` (Логика обновления `LLM_Decision_Log` и `NotificationService.sendAlert`). `return; }` `try {` (Логика `switch (decision.action)` -> вызов `handle...`). `this.eventBus.emit('trade_executed')`. (Логика `NotificationService.sendAlert`). (Логика `UPDATE LLM_Decision_Log SET result = 'accepted'`). `} catch (executionError) {`  `if (executionError instanceof ccxt.InsufficientFundsError)` -> `await GlobalStateService.pause()` + `await NotificationService.sendAlert("FATAL: InsufficientFunds! Pausing bot.", true)` + `await AccountStateService.refreshNow()`. (Логика `UPDATE LLM_Decision_Log` и `NotificationService.sendAlert`). `}`
 
 - **Задача 7.1.3 : Публикация Событий (Event Publishing)**
   - Описание: Эта задача теперь является частью `Задачи 7.1`. `EventBus` (`EventEmitter3`) используется для немедленной инвалидации кэша (`AccountStateService`).
@@ -282,7 +282,7 @@
 
 - **Задача 5.2: "Медленный Цикл" (SlowCycleService - `setInterval`)**
   - Описание: Реализация `checkIndicatorsAndOhlcv` (раздел В).
-  - Функционал: `setInterval` (e.g., 60s). `if (GlobalStateService.isPaused || GlobalStateService.isShuttingDown) return;`. Вызов `AccountStateService.refreshNow()`. Вызов `SyncEngine.reconcileStateAll()` (для плановой сверки всех пар). Проверка `timeout` / `indicator` триггеров. Вызов `WatcherOrchestrator.executeLLMCall`. **(Добавлено)** Метод `async stop()` (для `clearInterval`).
+  - Функционал: `setInterval` (e.g., 60s). `if (GlobalStateService.isPaused || GlobalStateService.isShuttingDown) return;`. Вызов `AccountStateService.refreshNow()`. Вызов `SyncEngine.reconcileStateAll()` (для плановой сверки всех пар). Проверка `timeout` / `indicator` триггеров. Вызов `WatcherOrchestrator.executeLLMCall`.  Метод `async stop()` (для `clearInterval`).
 
 - **Задача 5.2.1 : Аварийная Проверка "Зависшего Стопа" (Stop-Loss Janitor)**
   - Описание: Добавление "предохранителя" в `SlowCycleService`. **(Требует Эпик 9)**.
@@ -290,7 +290,7 @@
 
 - **Задача 5.3: "Быстрый Цикл" (FastCycleService - WebSocket)**
   - Описание: Реализация `onTickerData` (раздел Б) через `ccxt.watchTickers()`.
-  - Функционал: `if (GlobalStateService.isPaused || GlobalStateService.isShuttingDown) return;`. Подписка на `watchlist`. Делегирование обработки `TSLHandlerService` и `PriceTriggerHandler`. **(Добавлено)** Метод `async stop()` (для `ws.close()`).
+  - Функционал: `if (GlobalStateService.isPaused || GlobalStateService.isShuttingDown) return;`. Подписка на `watchlist`. Делегирование обработки `TSLHandlerService` и `PriceTriggerHandler`.  Метод `async stop()` (для `ws.close()`).
 
 - **Задача 5.4: Обработчик TSL (TSLHandlerService)**
   - Описание: Реализация "Задачи №1" из `onTickerData` (раздел Б). **(Требует Эпик 9)**.
@@ -298,7 +298,7 @@
 
 - **Задача 5.5: Обработчик Триггеров Цены (PriceTriggerHandler)**
   - Описание: Реализация "Задачи №2" из `onTickerData`. **(Требует Эпик 9)**.
-  - Функционал: `if (GlobalStateService.isPaused) return;`. `handleTicker(ticker, ...)`. `if (priceTrigger_hit)`: **(Добавлено)** `const accountState = this.accountStateService.getAccountState()`. **(Добавлено)** `const hasOpenLimit = accountState.open_orders.find(o => o.pair === ticker.pair && o.type === 'limit_open')`. **(Добавлено)** `if (hasOpenLimit) { Logger.debug('Price trigger ignored due to active OPEN_LIMIT order. Handing off to SyncEngine.'); return; }`. `this.pairActorManager.execute(ticker.pair, async () => { ... (Вызов` WatcherOrchestrator.executeLLMCall`) ... })`. **Критично:** `execute` вызывается _без_ `await`.
+  - Функционал: `if (GlobalStateService.isPaused) return;`. `handleTicker(ticker, ...)`. `if (priceTrigger_hit)`:  `const accountState = this.accountStateService.getAccountState()`.  `const hasOpenLimit = accountState.open_orders.find(o => o.pair === ticker.pair && o.type === 'limit_open')`.  `if (hasOpenLimit) { Logger.debug('Price trigger ignored due to active OPEN_LIMIT order. Handing off to SyncEngine.'); return; }`. `this.pairActorManager.execute(ticker.pair, async () => { ... (Вызов` WatcherOrchestrator.executeLLMCall`) ... })`. **Критично:** `execute` вызывается _без_ `await`.
 
 ## 🏛️ Фаза 5: Сборка и Тестирование
 
@@ -310,7 +310,7 @@
 
 - **Задача 8.1: Главная Точка Входа (Main Application - `index.ts`)**
   - Описание: Создание `index.ts`, который инициализирует все Singleton-сервисы (DB, Config, Logger, Exchange, etc.).
-  - Функционал: `async function main()`. 1. `Config.load()`. 2. `DB.connect()`. 3. `DB.runMigrations()`. 4. `ExchangeRulesLoader.loadRules()`. 5. Создание `EventBus`. 6. `PairActorManagerService` (Эпик 9). 7. `GlobalStateService` (Эпик 1). 8. `exchangeClient` (Mock/Real) и `llmClient` (Mock/Real). 9. `AccountStateService` (с `eventBus`). 10. `NotificationService` (с `AccountStateService`). 11. `SyncEngine.init(...)`. 12. `SyncEngine.reconcileStateAll(exchangeClient)`. 13. `SlowCycle.start(...)`. 14. `FastCycle.start(...)`. 15. **(Добавлено)** `GuaranteedOrderExecutionService.init(exchangeClient)`. 16. `WorkerService.init(..., guaranteedOrderService, ...)`.
+  - Функционал: `async function main()`. 1. `Config.load()`. 2. `DB.connect()`. 3. `DB.runMigrations()`. 4. `ExchangeRulesLoader.loadRules()`. 5. Создание `EventBus`. 6. `PairActorManagerService` (Эпик 9). 7. `GlobalStateService` (Эпик 1). 8. `exchangeClient` (Mock/Real) и `llmClient` (Mock/Real). 9. `AccountStateService` (с `eventBus`). 10. `NotificationService` (с `AccountStateService`). 11. `SyncEngine.init(...)`. 12. `SyncEngine.reconcileStateAll(exchangeClient)`. 13. `SlowCycle.start(...)`. 14. `FastCycle.start(...)`. 15.  `GuaranteedOrderExecutionService.init(exchangeClient)`. 16. `WorkerService.init(..., guaranteedOrderService, ...)`.
 
 - **Задача 8.1.1 : Реализация "Корректного Завершения" (Graceful Shutdown)**
   - Описание: Добавление обработчиков `process.on('SIGINT')` и `process.on('SIGTERM')` в `index.ts` (Задача 8.1).
@@ -318,7 +318,7 @@
 
 - **Задача 8.2: Модульное Тестирование (Unit Tests)**
   - Описание: Написание `jest` или `vitest` тестов для "чистой" логики (без БД).
-  - Функционал: Тесты для `ValidatorService` (все кейсы ошибок). Тесты для `TAEngineService`. Тесты для `decimal.js` расчетов. Тесты для `MockExchangeService`. Тесты для `ProductionLLMService`. **(Добавлено)** Тесты для `GuaranteedOrderExecutionService` (mocking `ccxt` и `NetworkError`).
+  - Функционал: Тесты для `ValidatorService` (все кейсы ошибок). Тесты для `TAEngineService`. Тесты для `decimal.js` расчетов. Тесты для `MockExchangeService`. Тесты для `ProductionLLMService`.  Тесты для `GuaranteedOrderExecutionService` (mocking `ccxt` и `NetworkError`).
 
 - **Задача 8.2.1 : Настройка Среды Интеграционного Тестирования**
   - Описание: Настройка `jest` (или `vitest`) с `testcontainers` или `docker-compose` для запуска ephemeral (временной) `PostgreSQL` БД для каждого тестового прогона.

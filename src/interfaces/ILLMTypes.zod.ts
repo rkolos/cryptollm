@@ -52,5 +52,3 @@ export const llmResponseSchema = z.object({
   }),
   request_additional_data: z.array(z.string()).nullable(),
 });
-
-export type LLMResponseZod = z.infer<typeof llmResponseSchema>;

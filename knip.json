@@ -16,6 +16,7 @@
     "typescript",
     "node-pg-migrate"
   ],
+  "ignoreExportsUsedInFile": true,
   "typescript": {
     "config": "tsconfig.json"
   }

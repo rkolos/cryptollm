@@ -7,14 +7,14 @@ import type winston from 'winston';
 /**
  * Интерфейс для TSLHandlerService (реализован в задаче 5.4)
  */
-export interface ITSLHandlerService {
+interface ITSLHandlerService {
   handleTicker(ticker: IDecimalTicker): void;
 }
 
 /**
  * Интерфейс для PriceTriggerHandler (будет реализован в задаче 5.5)
  */
-export interface IPriceTriggerHandler {
+interface IPriceTriggerHandler {
   handleTicker(ticker: IDecimalTicker): void;
 }
 

@@ -33,6 +33,19 @@ export interface IWorkerService {
  */
 export interface INotificationService {
   sendAlert(message: string, includeAccountState?: boolean): void;
+  sendTriggersUpdate?(
+    pair: string,
+    reason: string,
+    triggerConditions: Array<{
+      type: string;
+      condition: string;
+      value: number;
+      name?: string;
+      timeframe?: string;
+    }>,
+    requestedData: string[] | null,
+    updatedAt: Date,
+  ): void;
 }
 
 export class WatcherOrchestratorService {
@@ -212,6 +225,17 @@ export class WatcherOrchestratorService {
               );
 
               this.logger.debug(`[${pair}] LLM_Triggers обновлены для пары: ${llmResponse.update_triggers_for_pair}`);
+
+              // Отправляем уведомление об обновлении триггеров
+              if (this.notificationService.sendTriggersUpdate) {
+                this.notificationService.sendTriggersUpdate(
+                  llmResponse.update_triggers_for_pair,
+                  llmResponse.next_call_triggers.reason,
+                  llmResponse.next_call_triggers.trigger_conditions,
+                  llmResponse.request_additional_data,
+                  new Date(),
+                );
+              }
             });
           } catch (error) {
             this.logger.error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Не удалось записать аудит в БД:`, error);

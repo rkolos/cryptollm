@@ -231,17 +231,36 @@ export class SlowCycleService {
 
             // Проверка timeout триггеров
             if (condition.type === 'timeout') {
-              // Условие для timeout: значение - это timestamp в миллисекундах
-              const now = Date.now();
-              const triggerTime = condition.value;
-              this.logger.debug(
-                `(SlowCycle) [${pair}] Проверка timeout триггера: сейчас=${now}, триггер=${triggerTime}, разница=${triggerTime - now} мс`,
-              );
-              if (now >= triggerTime) {
-                triggerHit = true;
-                this.logger.info(
-                  `(SlowCycle) [${pair}] Сработал timeout триггер (value: ${triggerTime}, сейчас: ${now}).`,
+              if (condition.condition === 'minutes_passed') {
+                // Условие для timeout: проверяем, прошло ли указанное количество минут с момента последнего обновления триггера
+                const updatedAt = new Date(row.updated_at).getTime();
+                const now = Date.now();
+                const minutesPassed = Math.floor((now - updatedAt) / 60000); // Разница в минутах
+                const requiredMinutes = condition.value;
+
+                this.logger.debug(
+                  `(SlowCycle) [${pair}] Проверка timeout триггера (minutes_passed): прошло=${minutesPassed} мин, требуется=${requiredMinutes} мин`,
                 );
+
+                if (minutesPassed >= requiredMinutes) {
+                  triggerHit = true;
+                  this.logger.info(
+                    `(SlowCycle) [${pair}] Сработал timeout триггер (minutes_passed): прошло ${minutesPassed} минут, требуется ${requiredMinutes} минут.`,
+                  );
+                }
+              } else {
+                // Старый формат: значение - это timestamp в миллисекундах (для обратной совместимости)
+                const now = Date.now();
+                const triggerTime = condition.value;
+                this.logger.debug(
+                  `(SlowCycle) [${pair}] Проверка timeout триггера (legacy timestamp): сейчас=${now}, триггер=${triggerTime}, разница=${triggerTime - now} мс`,
+                );
+                if (now >= triggerTime) {
+                  triggerHit = true;
+                  this.logger.info(
+                    `(SlowCycle) [${pair}] Сработал timeout триггер (legacy timestamp) (value: ${triggerTime}, сейчас: ${now}).`,
+                  );
+                }
               }
             }
 

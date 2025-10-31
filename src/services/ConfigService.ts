@@ -106,6 +106,16 @@ export class ConfigService {
   }
 
   public getStrategyContext() {
+    // Для демо-счетов используем максимально агрессивный профиль
+    const isDemoAccount = this.config.APP_MODE === 'testnet' || this.config.APP_MODE === 'dry_run';
+
+    if (isDemoAccount) {
+      return {
+        role: 'aggressive_trader',
+        style: 'high_frequency_swing',
+      };
+    }
+
     return {
       role: this.config.STRATEGY_ROLE,
       style: this.config.STRATEGY_STYLE,
@@ -113,6 +123,20 @@ export class ConfigService {
   }
 
   public getRiskRules() {
+    // Для демо-счетов (testnet/dry_run) используем максимально агрессивные настройки
+    const isDemoAccount = this.config.APP_MODE === 'testnet' || this.config.APP_MODE === 'dry_run';
+
+    if (isDemoAccount) {
+      // Максимально агрессивные настройки для быстрого тестирования
+      return {
+        defaultRiskPercent: 20.0, // Высокий дефолтный риск
+        maxAllowedRiskPercent: 50.0, // Можно рисковать половиной портфеля на одной сделке
+        maxTotalPortfolioRiskPercent: 100.0, // Можно рисковать всем портфелем
+        desiredRiskRewardRatio: 1.0, // Даже 1:1 приемлемо для агрессивной торговли
+      };
+    }
+
+    // Для production используем значения из конфигурации
     return {
       defaultRiskPercent: this.config.RISK_DEFAULT_PERCENT,
       maxAllowedRiskPercent: this.config.RISK_MAX_PER_TRADE_PERCENT,
@@ -126,6 +150,14 @@ export class ConfigService {
   }
 
   public getSlowCycleIntervalMs(): number {
+    // Для демо-счетов используем более частую проверку для быстрого тестирования
+    const isDemoAccount = this.config.APP_MODE === 'testnet' || this.config.APP_MODE === 'dry_run';
+
+    if (isDemoAccount) {
+      // Проверка каждую минуту для максимальной активности
+      return 60000; // 1 минута
+    }
+
     // Дефолтное значение 10 минут (600000 мс)
     // Уменьшено частоты проверки триггеров для снижения нагрузки на API
     return 600000;

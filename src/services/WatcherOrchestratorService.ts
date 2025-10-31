@@ -124,6 +124,10 @@ export class WatcherOrchestratorService {
    */
   public executeOrchestration(pair: string, triggerReason: string): void {
     this.logger.info(`[${pair}] executeOrchestration вызван. Причина: ${triggerReason}`);
+
+    // Уведомление о срабатывании триггера
+    this.notificationService.sendAlert(`🔔 ТРИГГЕР СРАБОТАЛ: ${pair}\nПричина: ${triggerReason}`, false);
+
     // Враппер: Вся логика внутри PairActorManager для контроля конкурентности
     this.pairActorManager
       .execute(pair, async () => {
@@ -172,6 +176,16 @@ export class WatcherOrchestratorService {
             llmResponse = await this.llmService.ask(llmRequest);
             this.logger.info(
               `[${pair}] Получен ответ от LLM. Решений: ${llmResponse.decisions.length}, обновление триггеров для: ${llmResponse.update_triggers_for_pair}`,
+            );
+
+            // Уведомление об успешном вызове LLM
+            const decisionsCount = llmResponse.decisions.length;
+            const decisionsSummary = llmResponse.decisions.map((d) => `${d.action} (${d.pair})`).join(', ');
+            const summaryText =
+              decisionsCount > 0 ? `Решений: ${decisionsCount} (${decisionsSummary})` : 'Решений нет (HOLD)';
+            this.notificationService.sendAlert(
+              `✅ LLM ОТВЕТ ПОЛУЧЕН: ${pair}\n${summaryText}\nОбновление триггеров для: ${llmResponse.update_triggers_for_pair}`,
+              false,
             );
           } catch (error) {
             this.logger.error(`[${pair}] Ошибка при вызове LLM:`, error);

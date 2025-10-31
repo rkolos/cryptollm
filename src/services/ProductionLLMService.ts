@@ -124,6 +124,33 @@ export class ProductionLLMService implements ILLMService {
             const invalidTypeIssue = issue as { received?: unknown; expected?: string };
             errorInfo.received = typeof invalidTypeIssue.received;
             errorInfo.expected = invalidTypeIssue.expected;
+            // Добавляем фактическое значение для лучшей диагностики
+            if (issue.path.length > 0) {
+              try {
+                let currentValue: unknown = dataToValidate;
+                for (const key of issue.path) {
+                  const keyStr = String(key);
+                  if (
+                    currentValue &&
+                    typeof currentValue === 'object' &&
+                    currentValue !== null &&
+                    (keyStr in currentValue || (typeof key === 'number' && Array.isArray(currentValue)))
+                  ) {
+                    if (Array.isArray(currentValue) && typeof key === 'number') {
+                      currentValue = currentValue[key];
+                    } else {
+                      currentValue = (currentValue as Record<string, unknown>)[keyStr];
+                    }
+                  } else {
+                    currentValue = undefined;
+                    break;
+                  }
+                }
+                errorInfo.actualValue = currentValue;
+              } catch {
+                // Игнорируем ошибки при доступе к значению
+              }
+            }
           }
           this.logger.error(`Validation error ${index + 1}/${parseResult.error.issues.length}:`, errorInfo);
         });

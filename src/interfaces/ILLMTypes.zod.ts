@@ -1,9 +1,14 @@
 import { z } from 'zod';
 
+// Helper для преобразования null в undefined для optional полей
+const nullToUndefined = <T extends z.ZodTypeAny>(schema: T) => {
+  return z.preprocess((val) => (val === null ? undefined : val), schema);
+};
+
 const parametersSchema = z
   .object({
     type: z.enum(['market', 'limit']).optional(),
-    price: z.number().optional(),
+    price: nullToUndefined(z.number().optional()),
     risk_percent: z.number().optional().nullable(),
     stop_loss_price: z.number().optional().nullable(),
     take_profit_price: z.number().optional().nullable(),
@@ -14,10 +19,10 @@ const parametersSchema = z
       })
       .nullable()
       .optional(),
-    amount_percent: z.number().optional(),
+    amount_percent: nullToUndefined(z.number().optional()),
     order_id: z.string().nullable().optional(),
-    new_stop_loss_price: z.number().optional(),
-    new_take_profit_price: z.number().optional(),
+    new_stop_loss_price: nullToUndefined(z.number().optional()),
+    new_take_profit_price: nullToUndefined(z.number().optional()),
     new_trailing_stop_config: z
       .object({
         type: z.literal('percentage'),
@@ -38,9 +43,9 @@ const decisionSchema = z.object({
 const triggerSchema = z.object({
   type: z.enum(['price', 'indicator', 'timeout']),
   condition: z.string(),
-  value: z.number(),
-  name: z.string().optional(),
-  timeframe: z.string().optional(),
+  value: z.number(), // Обязательное поле - не может быть null
+  name: nullToUndefined(z.string().optional()),
+  timeframe: nullToUndefined(z.string().optional()),
 });
 
 export const llmResponseSchema = z.object({

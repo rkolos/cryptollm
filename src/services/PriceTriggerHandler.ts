@@ -26,6 +26,11 @@ export class PriceTriggerHandler {
   private readonly accountStateService: AccountStateService;
   private readonly pairActorManager: PairActorManagerService;
   private readonly orchestrator: WatcherOrchestratorService;
+  // Отслеживание сработавших триггеров для предотвращения повторных срабатываний
+  // Ключ: `${pair}:${condition.type}:${condition.condition}:${condition.value}`
+  private readonly triggeredTriggers: Set<string> = new Set();
+  // Хеши триггеров для каждой пары для обнаружения изменений
+  private readonly triggerHashes: Map<string, string> = new Map();
 
   private constructor(
     accountStateService: AccountStateService,
@@ -64,7 +69,18 @@ export class PriceTriggerHandler {
 
       // Если для этой пары нет триггеров, выходим
       if (!triggerConditions || triggerConditions.length === 0) {
+        // Очищаем сработавшие триггеры для этой пары, если триггеры были удалены
+        this._clearTriggeredTriggersForPair(pair);
         return;
+      }
+
+      // Проверяем, изменились ли триггеры для этой пары
+      const currentHash = this._hashTriggers(triggerConditions);
+      const previousHash = this.triggerHashes.get(pair);
+      if (previousHash !== currentHash) {
+        // Триггеры изменились - очищаем сработавшие триггеры для этой пары
+        this._clearTriggeredTriggersForPair(pair);
+        this.triggerHashes.set(pair, currentHash);
       }
 
       // Получаем текущую цену
@@ -77,6 +93,17 @@ export class PriceTriggerHandler {
 
       // Если триггер сработал
       if (triggeredCondition) {
+        // Создаем уникальный ключ для этого триггера
+        const triggerKey = this._getTriggerKey(pair, triggeredCondition);
+
+        // Проверяем, не срабатывал ли уже этот триггер
+        if (this.triggeredTriggers.has(triggerKey)) {
+          this.logger.debug(
+            `(PriceHandler) [${pair}] Price trigger ${triggeredCondition.condition} ${triggeredCondition.value} already triggered, ignoring.`,
+          );
+          return; // Триггер уже сработал, игнорируем
+        }
+
         // Триггер сработал. Проверяем "предохранитель" (Задача 5.5)
         const openLimitOrder = this._findOpenLimitOrder(state.open_orders, pair);
 
@@ -86,6 +113,9 @@ export class PriceTriggerHandler {
           );
           return; // Игнорируем, SyncEngine (5.1.2) справится
         }
+
+        // Помечаем триггер как сработавший ПЕРЕД вызовом оркестратора
+        this.triggeredTriggers.add(triggerKey);
 
         // "Предохранитель" не сработал, передаем управление Оркестратору
         this.logger.info(
@@ -152,5 +182,43 @@ export class PriceTriggerHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * Создает уникальный ключ для триггера
+   */
+  private _getTriggerKey(pair: string, condition: LLMTriggerCondition): string {
+    return `${pair}:${condition.type}:${condition.condition}:${condition.value}`;
+  }
+
+  /**
+   * Очищает все сработавшие триггеры для указанной пары
+   */
+  private _clearTriggeredTriggersForPair(pair: string): void {
+    const keysToDelete: string[] = [];
+    for (const key of this.triggeredTriggers) {
+      if (key.startsWith(`${pair}:`)) {
+        keysToDelete.push(key);
+      }
+    }
+    for (const key of keysToDelete) {
+      this.triggeredTriggers.delete(key);
+    }
+    if (keysToDelete.length > 0) {
+      this.logger.debug(`(PriceHandler) [${pair}] Cleared ${keysToDelete.length} triggered triggers.`);
+    }
+  }
+
+  /**
+   * Создает хеш триггеров для обнаружения изменений
+   */
+  private _hashTriggers(conditions: LLMTriggerCondition[]): string {
+    // Создаем простой хеш на основе типа, условия и значения всех price триггеров
+    const priceTriggers = conditions
+      .filter((c) => c.type === 'price')
+      .map((c) => `${c.type}:${c.condition}:${c.value}`)
+      .sort()
+      .join('|');
+    return priceTriggers;
   }
 }

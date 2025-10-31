@@ -138,15 +138,46 @@ export class LLMRequestAssemblerService {
 
   /**
    * Извлекает индикаторы и таймфреймы из requested_data_json
+   * Поддерживает несколько форматов:
+   * - JSON массив: ["adx_4h", "atr_4h"]
+   * - Строка с запятыми: "adx_4h,atr_4h"
+   * - Массив (если PostgreSQL вернул как массив)
    */
-  private parseRequestedData(requestedDataJson: string | null): { indicators: string[]; timeframes: string[] } {
-    if (!requestedDataJson) {
+  private parseRequestedData(requestedDataValue: string | string[] | null): {
+    indicators: string[];
+    timeframes: string[];
+  } {
+    if (!requestedDataValue) {
       return { indicators: [], timeframes: [] };
     }
 
+    let requested: string[] = [];
+
     try {
-      const requested = JSON.parse(requestedDataJson) as string[];
-      if (!Array.isArray(requested)) {
+      // Если это уже массив (PostgreSQL вернул JSONB как массив)
+      if (Array.isArray(requestedDataValue)) {
+        requested = requestedDataValue;
+      } else if (typeof requestedDataValue === 'string') {
+        // Если это строка, пытаемся парсить как JSON
+        try {
+          const parsed = JSON.parse(requestedDataValue);
+          if (Array.isArray(parsed)) {
+            requested = parsed;
+          } else {
+            // Если не массив, возможно это строка с запятыми
+            requested = requestedDataValue
+              .split(',')
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+          }
+        } catch {
+          // Если парсинг JSON не удался, обрабатываем как строку с запятыми
+          requested = requestedDataValue
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+        }
+      } else {
         return { indicators: [], timeframes: [] };
       }
 
@@ -159,9 +190,9 @@ export class LLMRequestAssemblerService {
           continue;
         }
         const parts = item.split('_');
-        if (parts.length >= 2) {
-          const indicator = parts[0];
-          const timeframe = parts.slice(1).join('_');
+        if (parts.length >= 2 && parts[0]) {
+          const indicator = parts[0].toLowerCase();
+          const timeframe = parts.slice(1).join('_').toLowerCase();
           if (indicator && timeframe) {
             indicators.add(indicator);
             timeframes.add(timeframe);
@@ -177,6 +208,52 @@ export class LLMRequestAssemblerService {
       this.logger.warn(`Failed to parse requested_data_json: ${error}`);
       return { indicators: [], timeframes: [] };
     }
+  }
+
+  /**
+   * Валидация и нормализация таймфреймов для Binance API
+   * Binance поддерживает: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+   */
+  private validateAndNormalizeTimeframes(timeframes: string[]): string[] {
+    const validBinanceTimeframes = new Set([
+      '1m',
+      '3m',
+      '5m',
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+      '4h',
+      '6h',
+      '8h',
+      '12h',
+      '1d',
+      '3d',
+      '1w',
+      '1M',
+    ]);
+
+    const normalized: string[] = [];
+
+    for (const tf of timeframes) {
+      if (!tf || typeof tf !== 'string') {
+        continue;
+      }
+
+      // Нормализация: приводим к нижнему регистру
+      const normalizedTf = tf.toLowerCase().trim();
+
+      // Проверяем, валиден ли таймфрейм для Binance
+      if (validBinanceTimeframes.has(normalizedTf)) {
+        normalized.push(normalizedTf);
+      } else {
+        this.logger.warn(
+          `Invalid timeframe "${tf}" (normalized: "${normalizedTf}") - skipping. Valid timeframes: ${Array.from(validBinanceTimeframes).join(', ')}`,
+        );
+      }
+    }
+
+    return normalized;
   }
 
   private toNumber(decimalValue: DecimalValue | null | undefined): number | null {
@@ -207,12 +284,14 @@ export class LLMRequestAssemblerService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const row = triggerResult.rows.length > 0 ? triggerResult.rows[0] : null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const requestedDataJson = row ? ((row as any).requested_data_json as string | null) : null;
-    const requestedData = this.parseRequestedData(requestedDataJson);
+    const requestedDataValue = row ? ((row as any).requested_data_json as string | string[] | null) : null;
+    const requestedData = this.parseRequestedData(requestedDataValue);
 
     // Обязательные базовые таймфреймы: 1h, 4h
     const baseTimeframes = ['1h', '4h'];
-    const uniqueTimeframes = Array.from(new Set([...baseTimeframes, ...requestedData.timeframes]));
+    // Валидация и нормализация таймфреймов для Binance API
+    const validTimeframes = this.validateAndNormalizeTimeframes([...baseTimeframes, ...requestedData.timeframes]);
+    const uniqueTimeframes = Array.from(new Set(validTimeframes));
 
     this.logger.debug(`Required timeframes: ${uniqueTimeframes.join(', ')}`);
     this.logger.debug(`Requested indicators: ${requestedData.indicators.join(', ')}`);

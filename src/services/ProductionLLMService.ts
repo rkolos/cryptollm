@@ -49,7 +49,10 @@ export class ProductionLLMService implements ILLMService {
   }
 
   public async ask(payload: LLMRequest): Promise<LLMResponse> {
-    this.logger.info(`Sending request to LLM for [${payload.triggered_pair}]...`);
+    const startTime = Date.now();
+    this.logger.info(
+      `🚀 [${payload.triggered_pair}] Отправка запроса к LLM (модель: ${this.modelName}, URL: ${this.httpClient.defaults.baseURL})...`,
+    );
 
     this.logger.debug('ProductionLLMService Request Payload:', {
       pair: payload.triggered_pair,
@@ -59,6 +62,8 @@ export class ProductionLLMService implements ILLMService {
 
     try {
       const responseData = await this.executeRequestWithRetry(payload);
+      const duration = Date.now() - startTime;
+      this.logger.info(`✅ [${payload.triggered_pair}] LLM ответ получен за ${duration}ms`);
 
       let dataToValidate: unknown = responseData;
 
@@ -158,7 +163,10 @@ export class ProductionLLMService implements ILLMService {
         throw new LLMResponseFormatError('LLM response format is invalid.', parseResult.error.issues, dataToValidate);
       }
 
-      this.logger.info(`Received and validated LLM response for [${payload.triggered_pair}].`);
+      const validationDuration = Date.now() - startTime;
+      this.logger.info(
+        `✅ [${payload.triggered_pair}] LLM ответ валидирован успешно. Время выполнения: ${validationDuration}ms. Решений: ${parseResult.data.decisions.length}`,
+      );
 
       return parseResult.data as LLMResponse;
     } catch (error) {
@@ -183,9 +191,36 @@ export class ProductionLLMService implements ILLMService {
       response_format: { type: 'json_object' },
     };
 
+    const requestStartTime = Date.now();
+    const payloadSize = JSON.stringify(payload).length;
+    this.logger.info(
+      `📤 [${payload.triggered_pair}] HTTP запрос к LLM API: модель=${this.modelName}, размер payload=${payloadSize} символов`,
+    );
+
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      const attemptStartTime = Date.now();
       try {
+        if (attempt === 0) {
+          this.logger.info(`📡 [${payload.triggered_pair}] Отправка POST /v1/chat/completions к LLM API...`);
+        } else {
+          this.logger.info(
+            `📡 [${payload.triggered_pair}] Повторная попытка ${attempt + 1}/${MAX_RETRIES}: отправка POST /v1/chat/completions...`,
+          );
+        }
         const response = await this.httpClient.post('/v1/chat/completions', requestBody);
+        const attemptDuration = Date.now() - attemptStartTime;
+        const totalDuration = Date.now() - requestStartTime;
+
+        if (attempt > 0) {
+          this.logger.info(
+            `✅ [${payload.triggered_pair}] LLM запрос успешен после ${attempt + 1} попытки(ок). Время этой попытки: ${attemptDuration}ms, общее время: ${totalDuration}ms`,
+          );
+        } else {
+          this.logger.info(
+            `✅ [${payload.triggered_pair}] LLM запрос успешен с первой попытки. Время выполнения: ${attemptDuration}ms`,
+          );
+        }
+
         return response.data;
       } catch (error) {
         if (!isAxiosError(error)) {
@@ -232,7 +267,10 @@ export class ProductionLLMService implements ILLMService {
       }
     }
 
-    this.logger.error(`LLM request failed after ${MAX_RETRIES} attempts.`);
+    const totalDuration = Date.now() - requestStartTime;
+    this.logger.error(
+      `❌ [${payload.triggered_pair}] LLM запрос провалился после ${MAX_RETRIES} попыток. Общее время: ${totalDuration}ms`,
+    );
     throw new LLMNetworkError(`LLM request failed after ${MAX_RETRIES} attempts.`);
   }
 }

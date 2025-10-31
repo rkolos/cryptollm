@@ -284,6 +284,77 @@ export class LLMRequestAssemblerService {
       [triggeredPair],
     );
 
+    // Шаг A.1: Получение последних отклоненных решений для этой пары (для обратной связи модели)
+    const recentRejectionsResult = await this.databaseService.query(
+      `SELECT 
+        id, 
+        timestamp, 
+        trigger_reason,
+        response_payload_json,
+        validator_error_message,
+        worker_error_message,
+        decision_result
+      FROM LLM_Decision_Log 
+      WHERE triggered_pair = $1 
+        AND decision_result IN ('rejected_by_validator', 'failed_by_worker')
+        AND timestamp > NOW() - INTERVAL '24 hours'
+      ORDER BY timestamp DESC 
+      LIMIT 3`,
+      [triggeredPair],
+    );
+
+    interface RejectionInfo {
+      timestamp: Date;
+      trigger_reason: string | null;
+      decisions: Array<{
+        action: string;
+        pair: string;
+        parameters: unknown;
+        justification: string;
+      }>;
+      error_message: string;
+      decision_result: string;
+    }
+
+    const recentRejections: RejectionInfo[] = [];
+    for (const row of recentRejectionsResult.rows) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const responseJson = row.response_payload_json as any;
+        let decisions: Array<{
+          action: string;
+          pair: string;
+          parameters: unknown;
+          justification: string;
+        }> = [];
+
+        if (responseJson && responseJson.decisions && Array.isArray(responseJson.decisions)) {
+          decisions = responseJson.decisions.map((d: unknown) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const decision = d as any;
+            return {
+              action: decision.action || 'UNKNOWN',
+              pair: decision.pair || triggeredPair,
+              parameters: decision.parameters || {},
+              justification: decision.justification || '',
+            };
+          });
+        }
+
+        const errorMessage = row.validator_error_message || row.worker_error_message || 'Причина отклонения не указана';
+
+        recentRejections.push({
+          timestamp: row.timestamp,
+          trigger_reason: row.trigger_reason,
+          decisions,
+          error_message: errorMessage,
+          decision_result: row.decision_result,
+        });
+      } catch (error) {
+        this.logger.warn(`Failed to parse rejection info from LLM_Decision_Log: ${error}`);
+      }
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const row = triggerResult.rows.length > 0 ? triggerResult.rows[0] : null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -491,7 +562,7 @@ export class LLMRequestAssemblerService {
     };
 
     // Шаг D: Сборка финального промпта
-    const userPrompt = this._buildUserPrompt(llmRequestData, triggeredPair, reason, macroContext);
+    const userPrompt = this._buildUserPrompt(llmRequestData, triggeredPair, reason, macroContext, recentRejections);
 
     return {
       system_prompt: this.promptCache.systemPrompt,
@@ -507,6 +578,18 @@ export class LLMRequestAssemblerService {
     triggeredPair: string,
     reason: string,
     macroContext: { fear_and_greed_index: number | null; fear_and_greed_text: string | null },
+    recentRejections: Array<{
+      timestamp: Date;
+      trigger_reason: string | null;
+      decisions: Array<{
+        action: string;
+        pair: string;
+        parameters: unknown;
+        justification: string;
+      }>;
+      error_message: string;
+      decision_result: string;
+    }>,
   ): string {
     if (!this.promptCache) {
       throw new Error('Prompt cache not initialized');
@@ -518,12 +601,67 @@ export class LLMRequestAssemblerService {
     // Заменяем остальные плейсхолдеры
     userPrompt = userPrompt.replace('{{TRIGGERED_PAIR}}', triggeredPair);
 
+    // Формируем информацию об отклоненных решениях
+    let rejectionInfoText = '';
+    if (recentRejections.length > 0) {
+      rejectionInfoText = '\n\n## ⚠️ ВАЖНО: История отклоненных решений\n\n';
+      rejectionInfoText +=
+        'Ниже приведены твои последние решения, которые были отклонены валидатором или не выполнены. ';
+      rejectionInfoText += 'Изучи причины отклонения и скорректируй новое решение, чтобы избежать тех же ошибок.\n\n';
+
+      for (const rejection of recentRejections) {
+        const timestamp = new Date(rejection.timestamp).toLocaleString('ru-RU');
+        rejectionInfoText += `**Отклонено:** ${timestamp}\n`;
+        rejectionInfoText += `**Причина вызова:** ${rejection.trigger_reason || 'не указана'}\n`;
+        rejectionInfoText += `**Статус:** ${rejection.decision_result}\n\n`;
+
+        if (rejection.decisions.length > 0) {
+          rejectionInfoText += '**Твои решения, которые были отклонены:**\n';
+          for (const decision of rejection.decisions) {
+            rejectionInfoText += `- **Действие:** ${decision.action} (${decision.pair})\n`;
+            if (decision.justification) {
+              rejectionInfoText += `  **Обоснование:** ${decision.justification}\n`;
+            }
+            // Показываем ключевые параметры
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const params = decision.parameters as any;
+            if (params) {
+              const paramParts: string[] = [];
+              if (params.risk_percent) paramParts.push(`risk_percent: ${params.risk_percent}`);
+              if (params.stop_loss_price) paramParts.push(`stop_loss_price: ${params.stop_loss_price}`);
+              if (params.take_profit_price) paramParts.push(`take_profit_price: ${params.take_profit_price}`);
+              if (params.amount_percent) paramParts.push(`amount_percent: ${params.amount_percent}`);
+              if (paramParts.length > 0) {
+                rejectionInfoText += `  **Параметры:** ${paramParts.join(', ')}\n`;
+              }
+            }
+            rejectionInfoText += '\n';
+          }
+        }
+
+        rejectionInfoText += `**Причина отклонения:** ${rejection.error_message}\n\n`;
+        rejectionInfoText += '---\n\n';
+      }
+
+      rejectionInfoText += '**Помни:** При принятии нового решения учитывай причины предыдущих отклонений. ';
+      rejectionInfoText +=
+        'Если решение было отклонено из-за превышения баланса, уменьши `risk_percent` или увеличь дистанцию до стопа. ';
+      rejectionInfoText +=
+        'Если решение было отклонено из-за других причин (например, некорректные параметры), исправь эти параметры в новом решении.\n\n';
+    }
+
     // Формируем FINAL_QUESTION из шаблона с подстановкой значений
-    const finalQuestion = this.promptCache.finalQuestionTemplate
+    let finalQuestion = this.promptCache.finalQuestionTemplate
       .replace(/{{TRIGGERED_PAIR}}/g, triggeredPair)
       .replace(/{{TRIGGER_REASON}}/g, reason)
       .replace(/{{MACRO_TEXT}}/g, macroContext.fear_and_greed_text || 'N/A')
       .replace(/{{MACRO_VALUE}}/g, macroContext.fear_and_greed_index?.toString() || 'N/A');
+
+    // Добавляем информацию об отклонениях перед финальным вопросом
+    if (rejectionInfoText) {
+      finalQuestion = rejectionInfoText + finalQuestion;
+    }
+
     userPrompt = userPrompt.replace('{{FINAL_QUESTION}}', finalQuestion);
 
     // Сериализуем JSON данные

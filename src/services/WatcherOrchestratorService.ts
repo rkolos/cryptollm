@@ -310,6 +310,57 @@ export class WatcherOrchestratorService {
             }
           }
 
+          // Шаг 5.5: Проверка результатов валидации и удаление триггеров при отклонении решений на открытие позиции
+          if (llmResponse.decisions.length > 0 && llmLogId) {
+            try {
+              // Проверяем, есть ли решения на открытие позиции (OPEN_LONG/OPEN_SHORT)
+              const hasOpenPositionDecisions = llmResponse.decisions.some(
+                (d) => d.action === 'OPEN_LONG' || d.action === 'OPEN_SHORT',
+              );
+
+              if (hasOpenPositionDecisions) {
+                // Проверяем финальный статус лога после выполнения всех решений
+                const logCheckResult = await this.databaseService.query(
+                  'SELECT decision_result FROM LLM_Decision_Log WHERE id = $1',
+                  [llmLogId],
+                );
+
+                if (logCheckResult.rows.length > 0) {
+                  const finalStatus = logCheckResult.rows[0].decision_result;
+
+                  // Если решение на открытие позиции отклонено валидатором, удаляем триггеры
+                  // (WorkerService обновляет статус на 'rejected_by_validator' при отклонении)
+                  // Это означает, что позиция не была открыта, и триггеры для её отслеживания не имеют смысла
+                  if (finalStatus === 'rejected_by_validator') {
+                    this.logger.warn(
+                      `[${pair}] Решение на открытие позиции отклонено валидатором. Удаление триггеров для пары ${llmResponse.update_triggers_for_pair}...`,
+                    );
+
+                    await this.databaseService.query('DELETE FROM LLM_Triggers WHERE pair = $1', [
+                      llmResponse.update_triggers_for_pair,
+                    ]);
+
+                    this.logger.info(
+                      `[${pair}] Триггеры удалены для пары ${llmResponse.update_triggers_for_pair} из-за отклонения решения на открытие позиции валидатором.`,
+                    );
+
+                    // Уведомление о удалении триггеров
+                    this.notificationService.sendAlert(
+                      `⚠️ [${pair}] Решение на открытие позиции отклонено валидатором. Триггеры для ${llmResponse.update_triggers_for_pair} удалены, так как позиция не была открыта.`,
+                      false,
+                    );
+
+                    // Обновляем кэш AccountStateService, чтобы удалить триггеры из памяти
+                    await this.accountStateService.refreshNow();
+                  }
+                }
+              }
+            } catch (error) {
+              // Не критическая ошибка - логируем, но не прерываем выполнение
+              this.logger.error(`[${pair}] Ошибка при проверке результатов валидации:`, error);
+            }
+          }
+
           // Шаг 6: Пост-Сверка (критично - только если есть решения)
           if (llmResponse.decisions.length > 0) {
             this.logger.info(`[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации...`);

@@ -297,8 +297,10 @@ export class AccountStateService {
           llmTriggers: llmTriggersMap,
         };
 
+        // Логирование балансов для отладки
+        const assetsSummary = assets.map((a) => `${a.asset}:${a.total.toString()}`).join(', ');
         this.logger.info(
-          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}, tslRules=${tslRulesMap.size}, llmTriggers=${llmTriggersMap.size}`,
+          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}, tslRules=${tslRulesMap.size}, llmTriggers=${llmTriggersMap.size}, assets=[${assetsSummary || 'none'}]`,
         );
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);

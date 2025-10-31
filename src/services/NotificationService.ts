@@ -79,6 +79,73 @@ export class NotificationService {
   }
 
   /**
+   * Ограничение длины текста с добавлением индикатора обрезки
+   */
+  private _truncateText(text: string, maxLength: number): string {
+    if (text.length <= maxLength) {
+      return text;
+    }
+    // Обрезаем с учетом места для индикатора
+    const truncated = text.substring(0, maxLength - 20);
+    // Находим последний пробел для красивого обрезания
+    const lastSpace = truncated.lastIndexOf(' ');
+    const cutPoint = lastSpace > maxLength * 0.8 ? lastSpace : truncated.length;
+    return `${text.substring(0, cutPoint)}...\n\\(сообщение обрезано\\)`;
+  }
+
+  /**
+   * Разбиение длинного сообщения на части для отправки в Telegram
+   * Telegram лимит: 4096 символов
+   */
+  private _splitMessage(message: string, maxLength: number = 4000): string[] {
+    if (message.length <= maxLength) {
+      return [message];
+    }
+
+    const parts: string[] = [];
+    let currentPart = '';
+    const lines = message.split('\n');
+
+    for (const line of lines) {
+      // Если одна строка слишком длинная, разбиваем её
+      if (line.length > maxLength) {
+        // Сохраняем текущую часть, если она не пустая
+        if (currentPart) {
+          parts.push(currentPart.trim());
+          currentPart = '';
+        }
+        // Разбиваем длинную строку на части
+        const words = line.split(' ');
+        for (const word of words) {
+          if ((currentPart + word).length > maxLength - 50) {
+            if (currentPart) {
+              parts.push(currentPart.trim());
+              currentPart = '';
+            }
+          }
+          currentPart += (currentPart ? ' ' : '') + word;
+        }
+        currentPart += '\n';
+      } else {
+        // Проверяем, поместится ли строка в текущую часть
+        if ((currentPart + line).length > maxLength) {
+          parts.push(currentPart.trim());
+          currentPart = line + '\n';
+        } else {
+          currentPart += line + '\n';
+        }
+      }
+    }
+
+    // Добавляем последнюю часть
+    if (currentPart.trim()) {
+      parts.push(currentPart.trim());
+    }
+
+    return parts;
+  }
+
+  /**
    * Отправка уведомления (синхронный метод, добавляет задачу в очередь)
    */
   public sendAlert(message: string, includeAccountState: boolean = false): void {
@@ -89,7 +156,20 @@ export class NotificationService {
     // Создаем асинхронную задачу для отправки
     const task = async (): Promise<void> => {
       try {
-        let fullMessage = this._escapeMarkdown(message);
+        // Ограничиваем длину обоснования LLM, если оно присутствует
+        let processedMessage = message;
+        if (message.includes('🤖 Обоснование LLM:')) {
+          const parts = message.split('🤖 Обоснование LLM:');
+          if (parts.length === 2 && parts[1]) {
+            const header = parts[0] + '🤖 Обоснование LLM:';
+            const justification = parts[1];
+            // Ограничиваем обоснование до 2000 символов
+            const truncatedJustification = this._truncateText(justification, 2000);
+            processedMessage = header + truncatedJustification;
+          }
+        }
+
+        let fullMessage = this._escapeMarkdown(processedMessage);
 
         if (includeAccountState && this.accountStateService) {
           const accountState = this.accountStateService.getAccountState();
@@ -97,11 +177,22 @@ export class NotificationService {
           fullMessage = `${fullMessage}\n\n${accountStateText}`;
         }
 
+        // Разбиваем сообщение на части, если оно слишком длинное
+        const messageParts = this._splitMessage(fullMessage);
+
         if (this.bot && this.chatId) {
-          await this.bot.sendMessage(this.chatId, fullMessage, {
-            parse_mode: 'MarkdownV2',
-          });
-          this.logger.debug('Notification sent successfully.');
+          for (let i = 0; i < messageParts.length; i++) {
+            const part = messageParts[i];
+            const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
+            await this.bot.sendMessage(this.chatId, part + partNumber, {
+              parse_mode: 'MarkdownV2',
+            });
+            // Небольшая задержка между частями
+            if (i < messageParts.length - 1) {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+            }
+          }
+          this.logger.debug(`Notification sent successfully (${messageParts.length} part(s)).`);
         }
       } catch (error) {
         this.logger.error('Error sending notification:', error);
@@ -170,6 +261,32 @@ export class NotificationService {
     const availableBalance = this._escapeMarkdown(state.available_quote_balance.toString());
     lines.push(`*Available:* \`${availableBalance}\` USDT`);
 
+    // Балансы только отслеживаемых валют из watchlist
+    const watchlist = this.configService.getWatchlist();
+    // Извлекаем базовые валюты из пар (например, BTC из BTC/USDT)
+    const trackedCurrencies = new Set<string>();
+    for (const pair of watchlist) {
+      const baseCurrency = pair.split('/')[0];
+      if (baseCurrency) {
+        trackedCurrencies.add(baseCurrency);
+      }
+    }
+
+    // Фильтруем assets, оставляя только отслеживаемые валюты
+    const trackedAssets = state.assets.filter((asset) => trackedCurrencies.has(asset.asset));
+
+    if (trackedAssets.length > 0) {
+      lines.push(`\n*Валюты на счете \\(отслеживаемые\\):*`);
+      for (const asset of trackedAssets) {
+        const assetName = this._escapeMarkdown(asset.asset);
+        const total = this._escapeMarkdown(asset.total.toString());
+        const available = this._escapeMarkdown(asset.available.toString());
+        lines.push(`  • ${assetName}: \`${total}\` \\(доступно: \`${available}\`\\)`);
+      }
+    } else {
+      lines.push(`\n*Валюты на счете:* нет отслеживаемых валют`);
+    }
+
     // Открытые позиции
     if (state.open_positions.length > 0) {
       lines.push(`\n*Позиции \\(${state.open_positions.length}\\):*`);
@@ -214,7 +331,9 @@ export class NotificationService {
         // Формируем сообщение с обоснованием LLM
         const actionEscaped = this._escapeMarkdown(action);
         const pairEscaped = this._escapeMarkdown(pair);
-        const justificationEscaped = this._escapeMarkdown(justification);
+        // Ограничиваем длину обоснования до 2000 символов
+        const truncatedJustification = this._truncateText(justification, 2000);
+        const justificationEscaped = this._escapeMarkdown(truncatedJustification);
 
         let message = `*✅ СДЕЛКА ИСПОЛНЕНА:*\n`;
         message += `*Действие:* ${actionEscaped}\n`;
@@ -222,11 +341,22 @@ export class NotificationService {
         message += `*🤖 Обоснование LLM:*\n${justificationEscaped}\n\n`;
         message += summaryText;
 
+        // Разбиваем сообщение на части, если оно слишком длинное
+        const messageParts = this._splitMessage(message);
+
         if (this.bot && this.chatId) {
-          await this.bot.sendMessage(this.chatId, message, {
-            parse_mode: 'MarkdownV2',
-          });
-          this.logger.debug('Trading summary sent successfully.');
+          for (let i = 0; i < messageParts.length; i++) {
+            const part = messageParts[i];
+            const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
+            await this.bot.sendMessage(this.chatId, part + partNumber, {
+              parse_mode: 'MarkdownV2',
+            });
+            // Небольшая задержка между частями
+            if (i < messageParts.length - 1) {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+            }
+          }
+          this.logger.debug(`Trading summary sent successfully (${messageParts.length} part(s)).`);
         }
       } catch (error) {
         this.logger.error('Error sending trading summary:', error);

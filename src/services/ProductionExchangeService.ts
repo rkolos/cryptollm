@@ -38,6 +38,7 @@ export class ProductionExchangeService implements IExchangeService {
       secret: binanceConfig.secret,
       enableRateLimit: true,
       enableTimeSync: true, // Включаем автоматическую синхронизацию времени
+      timeout: 30000, // Увеличиваем таймаут HTTP запросов до 30 секунд
       options: {
         defaultType: 'spot',
         recvWindow: 10000, // Увеличиваем окно времени до 10 секунд для надежности

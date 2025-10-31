@@ -94,50 +94,80 @@ export class ProductionExchangeService implements IExchangeService {
     }
   }
 
-  private async execute<T>(fn: () => Promise<T>): Promise<T> {
+  private async execute<T>(fn: () => Promise<T>, maxRetries: number = 3): Promise<T> {
     // Для testnet: синхронизируем время один раз при первом запросе
     if (this.appMode === 'testnet' && !this.timeSyncDone) {
       await this._syncTimeOnce();
     }
 
-    try {
-      return await fn();
-    } catch (error) {
-      // Если получили ошибку -1021 (timestamp), пробуем пересинхронизировать время и повторить запрос
-      if (
-        this.appMode === 'testnet' &&
-        error instanceof ccxt.NetworkError &&
-        error.message.includes('-1021') &&
-        error.message.includes('Timestamp')
-      ) {
-        this.logger.warn('Timestamp error detected, re-syncing time and retrying...');
-        this.timeSyncDone = false; // Сбрасываем флаг для повторной синхронизации
-        await this._syncTimeOnce();
-        // Повторяем запрос после синхронизации
+    let lastError: unknown;
+    const retryDelayMs = 1000; // Пауза между попытками: 1 секунда
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
         return await fn();
-      }
-      if (error instanceof ccxt.RateLimitExceeded) {
-        throw new ExchangeRateLimitError(`Rate limit exceeded: ${error.message}`, error);
-      }
+      } catch (error) {
+        lastError = error;
 
-      if (error instanceof ccxt.InsufficientFunds) {
-        throw new InsufficientFundsError(`Insufficient funds: ${error.message}`, undefined, error);
-      }
+        // Если получили ошибку -1021 (timestamp), пробуем пересинхронизировать время и повторить запрос
+        if (
+          this.appMode === 'testnet' &&
+          error instanceof ccxt.NetworkError &&
+          error.message.includes('-1021') &&
+          error.message.includes('Timestamp')
+        ) {
+          this.logger.warn('Timestamp error detected, re-syncing time and retrying...');
+          this.timeSyncDone = false; // Сбрасываем флаг для повторной синхронизации
+          await this._syncTimeOnce();
+          // Повторяем запрос после синхронизации без задержки
+          continue;
+        }
 
-      if (error instanceof ccxt.NetworkError) {
-        throw new ExchangeNetworkError(`Network error: ${error.message}`, error);
-      }
+        // Проверяем, является ли ошибка сетевой (timeout, network error) и можно ли повторить
+        const isRetryableError =
+          error instanceof ccxt.NetworkError ||
+          (error instanceof Error && (error.message.includes('timeout') || error.message.includes('timed out')));
 
-      if (error instanceof ccxt.OrderNotFound) {
-        throw new OrderNotFoundError(`Order not found: ${error.message}`, undefined, error);
-      }
+        if (isRetryableError && attempt < maxRetries - 1) {
+          const delay = retryDelayMs * (attempt + 1); // Увеличиваем задержку с каждой попыткой
+          this.logger.warn(
+            `Network error/timeout detected (attempt ${attempt + 1}/${maxRetries}): ${error instanceof Error ? error.message : String(error)}. Retrying in ${delay}ms...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue; // Повторяем попытку
+        }
 
-      if (error instanceof ccxt.BaseError) {
-        throw new ExchangeApiError(`Exchange API error: ${error.message}`, error);
-      }
+        // Если это не retryable ошибка или исчерпаны попытки, обрабатываем ошибку как обычно
+        if (error instanceof ccxt.RateLimitExceeded) {
+          throw new ExchangeRateLimitError(`Rate limit exceeded: ${error.message}`, error);
+        }
 
-      throw new ExchangeError(`Unknown exchange error: ${String(error)}`, error);
+        if (error instanceof ccxt.InsufficientFunds) {
+          throw new InsufficientFundsError(`Insufficient funds: ${error.message}`, undefined, error);
+        }
+
+        if (error instanceof ccxt.NetworkError) {
+          throw new ExchangeNetworkError(`Network error: ${error.message}`, error);
+        }
+
+        if (error instanceof ccxt.OrderNotFound) {
+          throw new OrderNotFoundError(`Order not found: ${error.message}`, undefined, error);
+        }
+
+        if (error instanceof ccxt.BaseError) {
+          throw new ExchangeApiError(`Exchange API error: ${error.message}`, error);
+        }
+
+        throw new ExchangeError(`Unknown exchange error: ${String(error)}`, error);
+      }
     }
+
+    // Если дошли сюда, значит все попытки исчерпаны
+    if (lastError instanceof ccxt.NetworkError) {
+      throw new ExchangeNetworkError(`Network error after ${maxRetries} attempts: ${lastError.message}`, lastError);
+    }
+
+    throw new ExchangeError(`Failed after ${maxRetries} attempts: ${String(lastError)}`, lastError);
   }
 
   private toDecimal(value: number | string | undefined | null): DecimalValue {

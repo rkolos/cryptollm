@@ -132,17 +132,93 @@
 }
 ```
 
+### Пример 3: Учет баланса при открытии позиции
+
+**Важно:** Этот пример показывает, как правильно учитывать доступный баланс при расчете размера позиции.
+
+```json
+{
+  "decisions": [
+    {
+      "action": "OPEN_LONG",
+      "pair": "ETH/USDT",
+      "parameters": {
+        "type": "market",
+        "risk_percent": 2.0,
+        "stop_loss_price": 3800.0,
+        "take_profit_price": 4000.0,
+        "trailing_stop_config": null
+      },
+      "justification": "RSI на 1H перепродан (30), MACD показывает разворот вверх. Цена находится у ключевого уровня поддержки 3850. Доступный баланс $10,000, max_position_size_usdt $10,000. При риске 2% ($200) и дистанции до стопа $50, размер позиции составит примерно $3,850, что значительно меньше доступного баланса. Вхожу с риском 2%."
+    }
+  ],
+  "update_triggers_for_pair": "ETH/USDT",
+  "next_call_triggers": {
+    "reason": "Отслеживаем новую позицию и следим за движением цены.",
+    "trigger_conditions": [
+      { "type": "price", "condition": "below", "value": 3800 },
+      { "type": "indicator", "name": "rsi", "timeframe": "1h", "condition": "above", "value": 70 }
+    ]
+  },
+  "request_additional_data": null
+}
+```
+
+### Пример 4: Корректировка из-за ограничения баланса
+
+**Важно:** Этот пример показывает, как нужно корректировать решение, если расчетный размер позиции превышает баланс.
+
+```json
+{
+  "decisions": [
+    {
+      "action": "OPEN_LONG",
+      "pair": "ETH/USDT",
+      "parameters": {
+        "type": "market",
+        "risk_percent": 1.5,
+        "stop_loss_price": 3820.0,
+        "take_profit_price": 4000.0,
+        "trailing_stop_config": null
+      },
+      "justification": "Сильный сигнал: RSI перепродан (25), цена у ключевого уровня. Изначально планировал риск 3%, но при текущей цене $3850 и стопе $3700 (дистанция $150) размер позиции составил бы $12,000, что превышает доступный баланс $10,000. Увеличил дистанцию до стопа до $30 (стоп $3820) и уменьшил риск до 1.5%, чтобы размер позиции ($7,700) был в пределах баланса."
+    }
+  ],
+  "update_triggers_for_pair": "ETH/USDT",
+  "next_call_triggers": {
+    "reason": "Отслеживаем новую позицию.",
+    "trigger_conditions": [
+      { "type": "price", "condition": "below", "value": 3820 }
+    ]
+  },
+  "request_additional_data": null
+}
+```
+
 ## Критические Требования
 
 1. **JSON Формат**: Ответ должен быть **ТОЛЬКО** валидным JSON-объектом без какого-либо обрамляющего текста.
 
-2. **Поле `justification`**: Каждый `decision` **ОБЯЗАН** содержать filled `justification` с цепочкой размышлений (Chain-of-Thought), описывающую:
+2. **Проверка Баланса (КРИТИЧЕСКИ ВАЖНО)**: Перед открытием позиции (`OPEN_LONG` / `OPEN_SHORT`) **ОБЯЗАТЕЛЬНО** проверь, что рассчитанный размер позиции не превышает `account_state.max_position_size_usdt` (или `account_state.available_quote_balance`). 
+   
+   **Формула расчета:**
+   - `usdAtRisk = total_portfolio_value_usdt * risk_percent / 100`
+   - `distanceToStop = |entryPrice - stop_loss_price|`
+   - `rawAmountCoin = usdAtRisk / distanceToStop`
+   - `positionSizeUsd = rawAmountCoin * entryPrice`
+   
+   **Проверка:** `positionSizeUsd <= max_position_size_usdt`
+   
+   Если размер позиции превышает баланс, ты **ДОЛЖЕН** либо уменьшить `risk_percent`, либо увеличить дистанцию до стопа, либо выбрать `HOLD`.
+
+3. **Поле `justification`**: Каждый `decision` **ОБЯЗАН** содержать filled `justification` с цепочкой размышлений (Chain-of-Thought), описывающую:
    - Какие индикаторы увидел в `technical_analysis`
    - Как `macro_context` повлиял на решение
-   - Как `account_state` повлиял на решение
+   - Как `account_state` (включая баланс) повлиял на решение
    - Почему выбран конкретный `risk_percent` (если открывается позиция)
+   - Как была проверена формула расчета размера позиции относительно баланса
 
-3. **Массив `decisions`**: Даже если ты не принимаешь торговых решений, массив `decisions` должен содержать хотя бы один элемент с `action: 'HOLD'` и обоснованием.
+4. **Массив `decisions`**: Даже если ты не принимаешь торговых решений, массив `decisions` должен содержать хотя бы один элемент с `action: 'HOLD'` и обоснованием.
 
-4. **Триггеры**: Всегда указывай `next_call_triggers` для отслеживания изменений на рынке.
+5. **Триггеры**: Всегда указывай `next_call_triggers` для отслеживания изменений на рынке.
 

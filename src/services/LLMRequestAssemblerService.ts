@@ -428,9 +428,15 @@ export class LLMRequestAssemblerService {
     }
 
     // Формирование account_state (конвертация Decimal в number)
+    // Вычисляем максимальный размер позиции на основе доступного баланса
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const availableBalanceDecimal = accountState.available_quote_balance as any;
+    const maxPositionSizeUsdt = this.toNumber(availableBalanceDecimal);
+
     const accountStateSerialized = {
       total_portfolio_value_usdt: this.toNumber(accountState.total_portfolio_value_usdt),
       available_quote_balance: this.toNumber(accountState.available_quote_balance),
+      max_position_size_usdt: maxPositionSizeUsdt, // Максимальный размер позиции в USDT (для Long)
       assets: accountState.assets.map((asset) => ({
         asset: asset.asset,
         total: this.toNumber(asset.total),

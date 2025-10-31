@@ -105,7 +105,14 @@ export class ProductionExchangeService implements IExchangeService {
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        return await fn();
+        const result = await fn();
+        // Если это повторная попытка и она успешна, логируем успех
+        if (attempt > 0) {
+          this.logger.info(
+            `Request succeeded after ${attempt + 1} attempt(s). Previous attempt(s) failed with network error/timeout.`,
+          );
+        }
+        return result;
       } catch (error) {
         lastError = error;
 
@@ -116,7 +123,9 @@ export class ProductionExchangeService implements IExchangeService {
           error.message.includes('-1021') &&
           error.message.includes('Timestamp')
         ) {
-          this.logger.warn('Timestamp error detected, re-syncing time and retrying...');
+          this.logger.warn(
+            `Timestamp error detected (attempt ${attempt + 1}/${maxRetries}), re-syncing time and retrying...`,
+          );
           this.timeSyncDone = false; // Сбрасываем флаг для повторной синхронизации
           await this._syncTimeOnce();
           // Повторяем запрос после синхронизации без задержки
@@ -135,6 +144,13 @@ export class ProductionExchangeService implements IExchangeService {
           );
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue; // Повторяем попытку
+        }
+
+        // Если это последняя попытка и ошибка retryable, логируем финальный провал
+        if (isRetryableError && attempt === maxRetries - 1) {
+          this.logger.error(
+            `All ${maxRetries} retry attempts failed. Last error: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
 
         // Если это не retryable ошибка или исчерпаны попытки, обрабатываем ошибку как обычно
@@ -163,6 +179,10 @@ export class ProductionExchangeService implements IExchangeService {
     }
 
     // Если дошли сюда, значит все попытки исчерпаны
+    this.logger.error(
+      `Request failed after ${maxRetries} attempts. Final error: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    );
+
     if (lastError instanceof ccxt.NetworkError) {
       throw new ExchangeNetworkError(`Network error after ${maxRetries} attempts: ${lastError.message}`, lastError);
     }

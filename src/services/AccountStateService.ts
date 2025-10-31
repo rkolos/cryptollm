@@ -297,10 +297,21 @@ export class AccountStateService {
           llmTriggers: llmTriggersMap,
         };
 
-        // Логирование балансов для отладки
-        const assetsSummary = assets.map((a) => `${a.asset}:${a.total.toString()}`).join(', ');
+        // Логирование балансов только отслеживаемых валют из watchlist
+        const watchlist = this.configService.getWatchlist();
+        // Извлекаем базовые валюты из пар (например, BTC из BTC/USDT)
+        const trackedCurrencies = new Set<string>();
+        for (const pair of watchlist) {
+          const baseCurrency = pair.split('/')[0];
+          if (baseCurrency) {
+            trackedCurrencies.add(baseCurrency);
+          }
+        }
+        // Фильтруем assets, оставляя только отслеживаемые валюты
+        const trackedAssets = assets.filter((asset) => trackedCurrencies.has(asset.asset));
+        const assetsSummary = trackedAssets.map((a) => `${a.asset}:${a.total.toString()}`).join(', ');
         this.logger.info(
-          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}, tslRules=${tslRulesMap.size}, llmTriggers=${llmTriggersMap.size}, assets=[${assetsSummary || 'none'}]`,
+          `Account state refreshed: total=${totalPortfolioValueUsdt.toString()}, available=${availableQuoteBalance.toString()}, positions=${openPositions.length}, orders=${openOrders.length}, tslRules=${tslRulesMap.size}, llmTriggers=${llmTriggersMap.size}, trackedAssets=[${assetsSummary || 'none'}]`,
         );
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);

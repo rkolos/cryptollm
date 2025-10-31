@@ -26,7 +26,8 @@
     "migrate:down": "npm run migrate:run -- down",
     "get-chat-id": "tsx ./scripts/get-telegram-chat-id.ts",
     "test:testnet": "tsx ./scripts/test-binance-testnet.ts",
-    "create-triggers": "tsx ./scripts/create-initial-triggers.ts"
+    "create-triggers": "tsx ./scripts/create-initial-triggers.ts",
+    "clear-db": "tsx ./scripts/clear-database.ts"
   },
   "keywords": [],
   "author": "",

@@ -267,7 +267,18 @@ export class AccountStateService {
           const pair = row.pair as string;
           let triggerConditions: LLMTriggerCondition[] = [];
           try {
-            triggerConditions = JSON.parse(row.trigger_conditions_json) as LLMTriggerCondition[];
+            // PostgreSQL возвращает JSONB как объект, а не строку
+            const triggerConditionsValue = row.trigger_conditions_json;
+            if (typeof triggerConditionsValue === 'string') {
+              triggerConditions = JSON.parse(triggerConditionsValue) as LLMTriggerCondition[];
+            } else if (Array.isArray(triggerConditionsValue)) {
+              triggerConditions = triggerConditionsValue as LLMTriggerCondition[];
+            } else {
+              this.logger.warn(
+                `Неожиданный тип trigger_conditions_json для пары ${pair}: ${typeof triggerConditionsValue}. Ожидается строка или массив.`,
+              );
+              continue;
+            }
           } catch (error) {
             this.logger.error(`Ошибка парсинга trigger_conditions_json для пары ${pair}:`, error);
             continue;

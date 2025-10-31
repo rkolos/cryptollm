@@ -25,22 +25,26 @@ import type winston from 'winston';
 export class ProductionExchangeService implements IExchangeService {
   private readonly ccxtExchange: ccxt.binance;
   private readonly logger: winston.Logger;
+  private timeSyncDone: boolean = false;
+  private readonly appMode: string;
 
   constructor() {
     const config = ConfigService.getInstance();
     const binanceConfig = config.getBinanceConfig();
+    this.appMode = config.getAppMode();
 
     this.ccxtExchange = new ccxt.binance({
       apiKey: binanceConfig.apiKey,
       secret: binanceConfig.secret,
       enableRateLimit: true,
+      enableTimeSync: true, // Включаем автоматическую синхронизацию времени
       options: {
         defaultType: 'spot',
+        recvWindow: 10000, // Увеличиваем окно времени до 10 секунд для надежности
       },
     });
 
-    const appMode = config.getAppMode();
-    if (appMode === 'testnet') {
+    if (this.appMode === 'testnet') {
       this.ccxtExchange.setSandboxMode(true);
       const logger = LoggingService.getInstance().getLogger('Exchange');
       logger.warn('Binance Testnet mode enabled.');
@@ -49,10 +53,68 @@ export class ProductionExchangeService implements IExchangeService {
     this.logger = LoggingService.getInstance().getLogger('Exchange');
   }
 
+  /**
+   * Синхронизирует время с сервером Binance Testnet один раз
+   */
+  private async _syncTimeOnce(): Promise<void> {
+    if (this.timeSyncDone) {
+      return;
+    }
+
+    try {
+      // Получаем время сервера через публичный endpoint (не требует авторизации)
+      const baseUrl = this.appMode === 'testnet' ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+      const serverTimeResponse = await fetch(`${baseUrl}/api/v3/time`);
+      const serverTimeData = (await serverTimeResponse.json()) as { serverTime: number };
+
+      if (serverTimeData.serverTime) {
+        const localTime = Date.now();
+        const timeDiff = serverTimeData.serverTime - localTime;
+
+        // CCXT автоматически синхронизирует время через loadTimeDifference
+        // Но мы можем явно установить разницу через прямое обращение к API
+        // Для этого используем встроенный механизм CCXT
+        await this.ccxtExchange.loadTimeDifference();
+
+        // Проверяем, что синхронизация прошла успешно
+        // Используем timeDifference из CCXT, если доступен
+        const ccxtTimeDiff = (this.ccxtExchange as unknown as { timeDifference?: number }).timeDifference || 0;
+        this.logger.info(
+          `Time synchronized: server=${serverTimeData.serverTime}, local=${localTime}, diff=${timeDiff}ms, CCXT diff=${ccxtTimeDiff}ms`,
+        );
+
+        this.timeSyncDone = true;
+      }
+    } catch (timeError) {
+      this.logger.warn(
+        `Time sync failed: ${timeError instanceof Error ? timeError.message : String(timeError)}. Will retry on next request.`,
+      );
+      // Не устанавливаем timeSyncDone = true, чтобы попробовать еще раз
+    }
+  }
+
   private async execute<T>(fn: () => Promise<T>): Promise<T> {
+    // Для testnet: синхронизируем время один раз при первом запросе
+    if (this.appMode === 'testnet' && !this.timeSyncDone) {
+      await this._syncTimeOnce();
+    }
+
     try {
       return await fn();
     } catch (error) {
+      // Если получили ошибку -1021 (timestamp), пробуем пересинхронизировать время и повторить запрос
+      if (
+        this.appMode === 'testnet' &&
+        error instanceof ccxt.NetworkError &&
+        error.message.includes('-1021') &&
+        error.message.includes('Timestamp')
+      ) {
+        this.logger.warn('Timestamp error detected, re-syncing time and retrying...');
+        this.timeSyncDone = false; // Сбрасываем флаг для повторной синхронизации
+        await this._syncTimeOnce();
+        // Повторяем запрос после синхронизации
+        return await fn();
+      }
       if (error instanceof ccxt.RateLimitExceeded) {
         throw new ExchangeRateLimitError(`Rate limit exceeded: ${error.message}`, error);
       }
@@ -274,48 +336,61 @@ export class ProductionExchangeService implements IExchangeService {
   }
 
   public async watchTickers(symbols: string[], callback: (ticker: IDecimalTicker) => Promise<void>): Promise<void> {
-    while (!GlobalStateService.getInstance().getIsShuttingDown()) {
+    // Binance не поддерживает watchTickers в CCXT, используем polling вместо WebSocket
+    // Это безопасная альтернатива, которая работает надежно для всех бирж
+    const pollIntervalMs = 1000; // Обновляем тикеры каждую секунду
+    let isRunning = true;
+
+    this.logger.info(`Starting ticker polling for ${symbols.length} pairs (interval: ${pollIntervalMs}ms)`);
+
+    while (isRunning && !GlobalStateService.getInstance().getIsShuttingDown()) {
       try {
-        const tickers = await this.ccxtExchange.watchTickers(symbols);
+        // Получаем тикеры для всех символов параллельно
+        const tickerPromises = symbols.map((symbol) =>
+          this.fetchTicker(symbol).catch((error) => {
+            this.logger.warn(
+              `Failed to fetch ticker for ${symbol}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return null;
+          }),
+        );
 
-        for (const ticker of Object.values(tickers)) {
-          const decimalTicker: IDecimalTicker = {
-            symbol: ticker.symbol,
-            last: this.toDecimal(ticker.last),
-            bid: this.toDecimal(ticker.bid),
-            ask: this.toDecimal(ticker.ask),
-            baseVolume: this.toDecimal(ticker.baseVolume),
-            quoteVolume: this.toDecimal(ticker.quoteVolume),
-            timestamp: ticker.timestamp,
-          };
+        const tickers = await Promise.all(tickerPromises);
 
-          await callback(decimalTicker);
+        // Вызываем callback для каждого успешно полученного тикера
+        for (const ticker of tickers) {
+          if (!isRunning || GlobalStateService.getInstance().getIsShuttingDown()) {
+            break;
+          }
+
+          if (ticker) {
+            try {
+              await callback(ticker);
+            } catch (callbackError) {
+              this.logger.error(
+                `Error in ticker callback for ${ticker.symbol}: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}`,
+              );
+            }
+          }
         }
+
+        // Ждем перед следующим обновлением
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
       } catch (error) {
-        if (error instanceof ccxt.RateLimitExceeded) {
-          this.logger.error('Rate limit exceeded in watchTickers:', error);
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          continue;
-        }
+        this.logger.error(
+          `Error in watchTickers polling loop: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        // При ошибке ждем немного дольше перед повтором
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs * 2));
+      }
 
-        if (error instanceof ccxt.NetworkError) {
-          this.logger.error('Network error in watchTickers:', error);
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          continue;
-        }
-
-        if (error instanceof ccxt.BaseError) {
-          this.logger.error('Exchange API error in watchTickers:', error);
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          continue;
-        }
-
-        this.logger.error('Unknown error in watchTickers:', error);
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+      // Проверяем флаг остановки
+      if (GlobalStateService.getInstance().getIsShuttingDown()) {
+        isRunning = false;
       }
     }
 
-    this.logger.info('watchTickers loop stopped (shutdown detected).');
+    this.logger.info('Ticker polling stopped');
   }
 
   public async close(): Promise<void> {

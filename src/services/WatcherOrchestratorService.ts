@@ -110,6 +110,7 @@ export class WatcherOrchestratorService {
    * Не является async, так как вызывается в режиме "fire-and-forget".
    */
   public executeOrchestration(pair: string, triggerReason: string): void {
+    this.logger.info(`[${pair}] executeOrchestration вызван. Причина: ${triggerReason}`);
     // Враппер: Вся логика внутри PairActorManager для контроля конкурентности
     this.pairActorManager
       .execute(pair, async () => {
@@ -118,8 +119,11 @@ export class WatcherOrchestratorService {
           this.logger.info(`[${pair}] Начало оркестрации. Причина: ${triggerReason}`);
           let requestPayload;
           try {
+            this.logger.debug(`[${pair}] Начало сборки запроса к LLM...`);
             requestPayload = await this.assemblerService.buildRequest(pair, triggerReason);
-            this.logger.debug(`[${pair}] Запрос к LLM собран успешно.`);
+            this.logger.info(
+              `[${pair}] Запрос к LLM собран успешно. Размер payload: ${JSON.stringify(requestPayload).length} символов`,
+            );
           } catch (error) {
             this.logger.error(`[${pair}] Ошибка при сборке запроса:`, error);
             return; // Выход из актора при ошибке сборки
@@ -151,8 +155,11 @@ export class WatcherOrchestratorService {
               question: requestPayload.user_prompt,
             };
 
+            this.logger.info(`[${pair}] Отправка запроса в LLM...`);
             llmResponse = await this.llmService.ask(llmRequest);
-            this.logger.info(`[${pair}] Получен ответ от LLM. Решений: ${llmResponse.decisions.length}`);
+            this.logger.info(
+              `[${pair}] Получен ответ от LLM. Решений: ${llmResponse.decisions.length}, обновление триггеров для: ${llmResponse.update_triggers_for_pair}`,
+            );
           } catch (error) {
             this.logger.error(`[${pair}] Ошибка при вызове LLM:`, error);
             return; // Выход из актора при ошибке LLM

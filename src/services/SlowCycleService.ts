@@ -180,6 +180,14 @@ export class SlowCycleService {
       const allTriggersResult = await this.databaseService.query('SELECT * FROM LLM_Triggers');
       const allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
 
+      this.logger.debug(`(SlowCycle) Проверка триггеров: найдено ${allTriggers.length} записей в LLM_Triggers`);
+
+      if (allTriggers.length === 0) {
+        this.logger.warn(
+          '(SlowCycle) В БД нет записей в таблице LLM_Triggers. Используйте скрипт create-triggers для создания начальных триггеров.',
+        );
+      }
+
       for (const row of allTriggers) {
         try {
           const pair = row.pair;
@@ -189,12 +197,23 @@ export class SlowCycleService {
 
           const triggerConditionsJson = row.trigger_conditions_json;
           if (!triggerConditionsJson) {
+            this.logger.debug(`(SlowCycle) [${pair}] trigger_conditions_json пуст, пропускаем.`);
             continue;
           }
 
           let conditions: LLMTriggerCondition[];
           try {
-            conditions = JSON.parse(triggerConditionsJson) as LLMTriggerCondition[];
+            // PostgreSQL возвращает JSONB как объект, а не строку
+            if (typeof triggerConditionsJson === 'string') {
+              conditions = JSON.parse(triggerConditionsJson) as LLMTriggerCondition[];
+            } else if (Array.isArray(triggerConditionsJson)) {
+              conditions = triggerConditionsJson as LLMTriggerCondition[];
+            } else {
+              this.logger.error(
+                `(SlowCycle) [${pair}] Неожиданный тип trigger_conditions_json: ${typeof triggerConditionsJson}`,
+              );
+              continue;
+            }
           } catch (parseError) {
             this.logger.error(`(SlowCycle) [${pair}] Ошибка парсинга trigger_conditions_json:`, parseError);
             continue; // Пропускаем эту пару при ошибке парсинга
@@ -205,15 +224,24 @@ export class SlowCycleService {
             continue;
           }
 
+          this.logger.debug(`(SlowCycle) [${pair}] Проверка ${conditions.length} условий триггера`);
+
           for (const condition of conditions) {
             let triggerHit = false;
 
             // Проверка timeout триггеров
             if (condition.type === 'timeout') {
               // Условие для timeout: значение - это timestamp в миллисекундах
-              if (Date.now() >= condition.value) {
+              const now = Date.now();
+              const triggerTime = condition.value;
+              this.logger.debug(
+                `(SlowCycle) [${pair}] Проверка timeout триггера: сейчас=${now}, триггер=${triggerTime}, разница=${triggerTime - now} мс`,
+              );
+              if (now >= triggerTime) {
                 triggerHit = true;
-                this.logger.info(`(SlowCycle) [${pair}] Сработал timeout триггер (value: ${condition.value}).`);
+                this.logger.info(
+                  `(SlowCycle) [${pair}] Сработал timeout триггер (value: ${triggerTime}, сейчас: ${now}).`,
+                );
               }
             }
 
@@ -258,6 +286,7 @@ export class SlowCycleService {
 
             // Если триггер сработал, запускаем оркестрацию и прерываем цикл для этой пары
             if (triggerHit) {
+              this.logger.info(`(SlowCycle) [${pair}] Триггер сработал! Запуск оркестрации LLM запроса...`);
               this.orchestrator.executeOrchestration(
                 pair,
                 `SlowCycle Trigger: ${condition.type} (${condition.name || 'timeout'})`,

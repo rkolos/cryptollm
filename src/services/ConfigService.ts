@@ -23,6 +23,7 @@ const configSchema = z.object({
   RISK_MAX_TOTAL_PORTFOLIO_PERCENT: z.coerce.number().positive(),
   RISK_DESIRED_RR_RATIO: z.coerce.number().positive(),
   DRY_RUN_INITIAL_USDT: z.coerce.number().positive().optional(),
+  WORKER_LOCAL_EXECUTION_BALANCE_PERCENT: z.coerce.number().min(0).max(1).optional(),
 });
 
 type AppConfig = z.infer<typeof configSchema>;
@@ -153,5 +154,11 @@ export class ConfigService {
     // Дефолтное значение 10 минут (600000 мс)
     // Уменьшено частоты проверки триггеров для снижения нагрузки на API
     return 600000;
+  }
+
+  public getLocalExecutionBalancePercent(): number {
+    // Дефолтное значение 10% (0.10) от доступного баланса для локального выполнения
+    // Используется когда валидатор отклоняет решение из-за превышения баланса
+    return this.config.WORKER_LOCAL_EXECUTION_BALANCE_PERCENT ?? 0.1;
   }
 }

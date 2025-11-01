@@ -20,6 +20,7 @@ import type {
 } from '../interfaces/IValidatorTypes.js';
 import type { IDecimalOrder } from '../interfaces/IExchangeService.js';
 import { InsufficientFundsError } from '../errors/ExchangeErrors.js';
+import { ValidationError } from '../errors/ValidationError.js';
 import type winston from 'winston';
 import type { PoolClient } from 'pg';
 
@@ -136,13 +137,170 @@ export class WorkerService {
       const errorMessage = validationError instanceof Error ? validationError.message : String(validationError);
       this.logger.error(`[${pair}] ПРОВАЛ ВАЛИДАЦИИ: ${errorMessage}`);
 
-      // Обновляем лог в БД
-      await this._updateDecisionLog(llm_decision_log_id, 'rejected_by_validator', errorMessage, null);
+      // Проверяем, является ли это ошибкой превышения баланса для действий OPEN_LONG/OPEN_SHORT
+      const isBalanceError =
+        validationError instanceof ValidationError &&
+        (errorMessage.includes('превышает доступный баланс') || errorMessage.includes('превышает')) &&
+        (decision.action === 'OPEN_LONG' || decision.action === 'OPEN_SHORT');
 
-      // Отправляем уведомление
-      this.notificationService.sendAlert(`[${pair}] РЕШЕНИЕ ОТКЛОНЕНО: ${errorMessage}`, false);
+      if (isBalanceError) {
+        // ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитываем размер позиции на основе доступного баланса
+        this.logger.info(
+          `[${pair}] Попытка локального выполнения с пересчетом размера позиции на основе доступного баланса`,
+        );
 
-      return; // Остановка
+        try {
+          // Получаем доступный баланс
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const availableBalanceDecimal = accountState.available_quote_balance as any;
+          // Получаем процент баланса для локального выполнения из конфигурации (по умолчанию 10%)
+          const localExecutionPercentValue = this.configService.getLocalExecutionBalancePercent();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const localExecutionPercent = new DecimalConstructor(localExecutionPercentValue);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const maxUsdForOrder = availableBalanceDecimal.mul(localExecutionPercent) as DecimalValue;
+
+          // Получаем цену входа
+          const entryPrice = decision.parameters.price || (marketData.current_price as DecimalValue);
+          if (!entryPrice) {
+            throw new Error(`[${pair}] Не удалось определить цену входа для локального выполнения`);
+          }
+
+          // Получаем цену стоп-лосса для расчета дистанции
+          const stopLossPrice = decision.parameters.stop_loss_price;
+          if (!stopLossPrice) {
+            throw new Error(`[${pair}] Не удалось определить цену стоп-лосса для локального выполнения`);
+          }
+
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const entryPriceDecimal = entryPrice as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const stopLossPriceDecimal = stopLossPrice as any;
+
+          // Рассчитываем дистанцию до стопа (как в оригинальной формуле)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const distanceToStop = entryPriceDecimal.sub(stopLossPriceDecimal).abs() as DecimalValue;
+
+          // Проверяем, что дистанция не нулевая
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const zero = new DecimalConstructor(0);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const distanceDecimal = distanceToStop as any;
+          if (distanceDecimal.isZero() || distanceDecimal.eq(zero)) {
+            throw new Error(`[${pair}] Дистанция до стопа равна нулю, локальное выполнение невозможно`);
+          }
+
+          // Рассчитываем максимальное количество монет на основе доступного баланса
+          // Используем формулу: amountCoin = maxUsdForOrder / entryPrice
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const maxAmountCoin = maxUsdForOrder.div(entryPriceDecimal) as DecimalValue;
+
+          // Получаем правила биржи для округления
+          const exchangeRules = this.exchangeRulesService.getRules(pair);
+          const precision = exchangeRules.precision;
+
+          // Округляем amount по правилам биржи
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const maxAmountCoinDecimal = maxAmountCoin as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const amountPrecisionDecimal = precision.amount as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const amountPrecisionE = amountPrecisionDecimal.e !== undefined ? Math.abs(amountPrecisionDecimal.e) : 0;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const amountMultiplier = new DecimalConstructor(10).pow(amountPrecisionE);
+          // Округляем вниз до нужной точности
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const roundedAmountCoin = maxAmountCoinDecimal
+            .mul(amountMultiplier)
+            .floor()
+            .div(amountMultiplier) as DecimalValue;
+
+          // Пересчитываем стоимость ордера
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const roundedAmountCoinDecimal = roundedAmountCoin as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const roundedAmountUsd = roundedAmountCoinDecimal.mul(entryPriceDecimal) as DecimalValue;
+
+          // Рассчитываем реальный USD@Risk на основе пересчитанного размера
+          // Формула: usdAtRisk = amountCoin * distanceToStop
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const recalculatedUsdAtRisk = roundedAmountCoinDecimal.mul(distanceDecimal) as DecimalValue;
+
+          // Проверяем minNotional
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const minNotionalDecimal = exchangeRules.minNotional as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const roundedAmountUsdDecimal = roundedAmountUsd as any;
+
+          if (roundedAmountUsdDecimal.lt(minNotionalDecimal)) {
+            this.logger.warn(
+              `[${pair}] После пересчета размер позиции $${roundedAmountUsdDecimal.toFixed(2)} ниже биржевого минимума $${minNotionalDecimal.toString()}. Локальное выполнение невозможно.`,
+            );
+            // Не можем выполнить локально, продолжаем стандартную обработку отклонения
+          } else {
+            // Проверяем, что размер больше нуля
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const zero = new DecimalConstructor(0);
+            if (roundedAmountCoinDecimal.isZero() || roundedAmountCoinDecimal.eq(zero)) {
+              this.logger.warn(`[${pair}] После пересчета размер позиции стал 0. Локальное выполнение невозможно.`);
+              // Не можем выполнить локально, продолжаем стандартную обработку отклонения
+            } else {
+              // Создаем модифицированный validationResult для локального выполнения
+              const localValidationResult: CalculatedAmounts = {
+                rawAmountCoin: roundedAmountCoin,
+                rawAmountUsd: roundedAmountUsd,
+                roundedAmountCoin: roundedAmountCoin,
+                roundedAmountUsd: roundedAmountUsd,
+                roundedEntryPrice: entryPrice,
+                usdAtRisk: recalculatedUsdAtRisk, // Реальный риск на основе дистанции до стопа
+                entryPrice: entryPrice,
+              };
+
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const recalculatedUsdAtRiskDecimal = recalculatedUsdAtRisk as any;
+              this.logger.info(
+                `[${pair}] ✅ ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитанный размер позиции ${roundedAmountCoinDecimal.toString()} монет ($${roundedAmountUsdDecimal.toFixed(2)}), реальный риск: $${recalculatedUsdAtRiskDecimal.toFixed(2)}`,
+              );
+
+              // Обновляем лог в БД с пометкой о локальном выполнении
+              // Статус будет обновлен на 'accepted' после успешного выполнения
+              await this._updateDecisionLog(
+                llm_decision_log_id,
+                'rejected_by_validator',
+                `${errorMessage} [ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитан размер до $${roundedAmountUsdDecimal.toFixed(2)}]`,
+                null,
+              );
+
+              // Отправляем уведомление о локальном выполнении
+              this.notificationService.sendAlert(
+                `[${pair}] ⚠️ ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Решение было отклонено валидатором из-за превышения баланса, но выполняется с пересчитанным размером $${roundedAmountUsdDecimal.toFixed(2)} (вместо запрошенного)`,
+                false,
+              );
+
+              // Переходим к выполнению с пересчитанным размером
+              validationResult = localValidationResult;
+              // Выходим из catch блока и продолжаем выполнение
+            }
+          }
+        } catch (localExecutionError) {
+          const localErrorMessage =
+            localExecutionError instanceof Error ? localExecutionError.message : String(localExecutionError);
+          this.logger.error(`[${pair}] ОШИБКА ЛОКАЛЬНОГО ВЫПОЛНЕНИЯ: ${localErrorMessage}`);
+          // Если локальное выполнение не удалось, продолжаем стандартную обработку отклонения
+        }
+      }
+
+      // Если не было локального выполнения или оно не удалось, продолжаем стандартную обработку отклонения
+      if (!validationResult) {
+        // Обновляем лог в БД
+        await this._updateDecisionLog(llm_decision_log_id, 'rejected_by_validator', errorMessage, null);
+
+        // Отправляем уведомление
+        this.notificationService.sendAlert(`[${pair}] РЕШЕНИЕ ОТКЛОНЕНО: ${errorMessage}`, false);
+
+        return; // Остановка
+      }
+      // Если validationResult был установлен (локальное выполнение успешно), продолжаем выполнение
     }
 
     // --- Шаг 2: ИСПОЛНЕНИЕ ---

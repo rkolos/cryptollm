@@ -154,6 +154,25 @@ export class LLMRequestAssemblerService {
       return { indicators: [], timeframes: [] };
     }
 
+    // Валидные таймфреймы для Binance
+    const validBinanceTimeframes = new Set([
+      '1m',
+      '3m',
+      '5m',
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+      '4h',
+      '6h',
+      '8h',
+      '12h',
+      '1d',
+      '3d',
+      '1w',
+      '1M',
+    ]);
+
     let requested: string[] = [];
 
     try {
@@ -194,11 +213,24 @@ export class LLMRequestAssemblerService {
         }
         const parts = item.split('_');
         if (parts.length >= 2 && parts[0]) {
-          const indicator = parts[0].toLowerCase();
-          const timeframe = parts.slice(1).join('_').toLowerCase();
-          if (indicator && timeframe) {
-            indicators.add(indicator);
-            timeframes.add(timeframe);
+          // Проверяем, является ли последняя часть валидным timeframe
+          const lastPart = parts[parts.length - 1];
+          if (lastPart) {
+            const normalizedLastPart = lastPart.toLowerCase().trim();
+            if (validBinanceTimeframes.has(normalizedLastPart)) {
+              // Последняя часть - валидный timeframe
+              const indicator = parts.slice(0, -1).join('_').toLowerCase();
+              const timeframe = normalizedLastPart;
+              if (indicator && timeframe) {
+                indicators.add(indicator);
+                timeframes.add(timeframe);
+              }
+            } else {
+              // Последняя часть не является валидным timeframe - игнорируем элемент
+              // Это может быть индикатор без timeframe (например, "key_levels")
+              // или неправильный формат
+              this.logger.debug(`Skipping item "${item}" - last part "${normalizedLastPart}" is not a valid timeframe`);
+            }
           }
         }
       }
@@ -307,6 +339,23 @@ export class LLMRequestAssemblerService {
       [triggeredPair],
     );
 
+    // Шаг A.2: Получение последних успешных решений с обоснованиями для этой пары
+    const recentAcceptedDecisionsResult = await this.databaseService.query(
+      `SELECT 
+        id, 
+        timestamp, 
+        trigger_reason,
+        response_payload_json,
+        decision_result
+      FROM LLM_Decision_Log 
+      WHERE triggered_pair = $1 
+        AND decision_result = 'accepted'
+        AND timestamp > NOW() - INTERVAL '7 days'
+      ORDER BY timestamp DESC 
+      LIMIT 3`,
+      [triggeredPair],
+    );
+
     interface RejectionInfo {
       timestamp: Date;
       trigger_reason: string | null;
@@ -374,6 +423,59 @@ export class LLMRequestAssemblerService {
           `[${triggeredPair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Не найдено отклоненных решений в БД за последние 24 часа.`,
         );
       }
+    }
+
+    // Парсинг последних успешных решений с обоснованиями
+    interface PreviousDecisionInfo {
+      timestamp: Date;
+      trigger_reason: string | null;
+      decisions: Array<{
+        action: string;
+        pair: string;
+        parameters: unknown;
+        justification: string;
+      }>;
+    }
+
+    const recentAcceptedDecisions: PreviousDecisionInfo[] = [];
+    for (const row of recentAcceptedDecisionsResult.rows) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const responseJson = row.response_payload_json as any;
+        let decisions: Array<{
+          action: string;
+          pair: string;
+          parameters: unknown;
+          justification: string;
+        }> = [];
+
+        if (responseJson && responseJson.decisions && Array.isArray(responseJson.decisions)) {
+          decisions = responseJson.decisions.map((d: unknown) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const decision = d as any;
+            return {
+              action: decision.action || 'UNKNOWN',
+              pair: decision.pair || triggeredPair,
+              parameters: decision.parameters || {},
+              justification: decision.justification || '',
+            };
+          });
+        }
+
+        recentAcceptedDecisions.push({
+          timestamp: row.timestamp,
+          trigger_reason: row.trigger_reason,
+          decisions,
+        });
+      } catch (error) {
+        this.logger.warn(`Failed to parse accepted decision info from LLM_Decision_Log:`, error);
+      }
+    }
+
+    if (recentAcceptedDecisions.length > 0) {
+      this.logger.debug(
+        `[${triggeredPair}] Найдено ${recentAcceptedDecisions.length} успешных решений за последние 7 дней. Информация будет включена в контекст для LLM.`,
+      );
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -528,6 +630,39 @@ export class LLMRequestAssemblerService {
     const availableBalanceDecimal = accountState.available_quote_balance as any;
     const maxPositionSizeUsdt = this.toNumber(availableBalanceDecimal);
 
+    // Формируем информацию о текущих установленных триггерах
+    const activeTriggers: Record<
+      string,
+      Array<{
+        type: string;
+        condition: string;
+        value: number;
+        name?: string;
+        timeframe?: string;
+      }>
+    > = {};
+
+    for (const [pair, triggerConditions] of accountState.llmTriggers.entries()) {
+      activeTriggers[pair] = triggerConditions.map((trigger) => ({
+        type: trigger.type,
+        condition: trigger.condition,
+        value: trigger.value,
+        name: trigger.name,
+        timeframe: trigger.timeframe,
+      }));
+    }
+
+    // Формируем информацию о предыдущих обоснованиях (только для текущей пары)
+    const previousJustifications = recentAcceptedDecisions.map((decisionInfo: PreviousDecisionInfo) => ({
+      timestamp: decisionInfo.timestamp.toISOString(),
+      trigger_reason: decisionInfo.trigger_reason,
+      decisions: decisionInfo.decisions.map((d: { action: string; pair: string; justification: string }) => ({
+        action: d.action,
+        pair: d.pair,
+        justification: d.justification,
+      })),
+    }));
+
     const accountStateSerialized = {
       total_portfolio_value_usdt: this.toNumber(accountState.total_portfolio_value_usdt),
       available_quote_balance: this.toNumber(accountState.available_quote_balance),
@@ -545,6 +680,10 @@ export class LLMRequestAssemblerService {
         stop_loss_price: this.toNumber(pos.stop_loss_price),
       })),
       open_orders: accountState.open_orders,
+      // Текущие установленные триггеры для всех пар в watchlist
+      active_triggers: activeTriggers,
+      // Предыдущие обоснования модели по текущей паре (последние успешные решения)
+      previous_justifications: previousJustifications,
     };
 
     // Логируем критически важную информацию о балансе для отладки

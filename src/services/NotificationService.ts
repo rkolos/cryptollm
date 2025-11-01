@@ -401,7 +401,7 @@ export class NotificationService {
 
     // Открытые ордера
     if (state.open_orders.length > 0) {
-      lines.push(`\n*Ордера (${state.open_orders.length}):*`);
+      lines.push(`\n*Ордера \\(${state.open_orders.length}\\):*`);
       for (const order of state.open_orders) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const orderTyped = order as any;

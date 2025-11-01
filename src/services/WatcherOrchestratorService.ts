@@ -271,7 +271,29 @@ export class WatcherOrchestratorService {
               llmLogId = String(logResult.rows[0].id);
               this.logger.debug(`[${pair}] LLM_Decision_Log создан. ID: ${llmLogId}`);
 
-              // 3.2. Обновление LLM_Triggers (UPSERT)
+              // 3.2. Обновление LLM_Triggers (UPSERT) с проверкой на пустой массив
+              let triggerConditionsToSave = llmResponse.next_call_triggers.trigger_conditions;
+              let reasonToSave = llmResponse.next_call_triggers.reason;
+              let isFallbackTrigger = false;
+
+              // Проверка: если модель не установила триггеры (пустой массив), создаем fallback
+              if (!triggerConditionsToSave || triggerConditionsToSave.length === 0) {
+                const defaultTimeoutMinutes = this.configService.getDefaultTriggerTimeoutMinutes();
+                this.logger.warn(
+                  `[${pair}] Модель не установила триггеры (пустой массив). Создаю fallback timeout триггер на ${defaultTimeoutMinutes} минут.`,
+                );
+
+                triggerConditionsToSave = [
+                  {
+                    type: 'timeout' as const,
+                    condition: 'minutes_passed',
+                    value: defaultTimeoutMinutes,
+                  },
+                ];
+                reasonToSave = `Fallback триггер (модель не установила триггеры): проверка через ${defaultTimeoutMinutes} минут`;
+                isFallbackTrigger = true;
+              }
+
               await client.query(
                 `INSERT INTO LLM_Triggers (pair, reason, trigger_conditions_json, requested_data_json, updated_at)
                VALUES ($1, $2, $3, $4, $5)
@@ -282,21 +304,27 @@ export class WatcherOrchestratorService {
                  updated_at = EXCLUDED.updated_at`,
                 [
                   llmResponse.update_triggers_for_pair,
-                  llmResponse.next_call_triggers.reason,
-                  JSON.stringify(llmResponse.next_call_triggers.trigger_conditions),
+                  reasonToSave,
+                  JSON.stringify(triggerConditionsToSave),
                   JSON.stringify(llmResponse.request_additional_data),
                   new Date(),
                 ],
               );
 
+              if (isFallbackTrigger) {
+                this.logger.info(
+                  `[${pair}] Установлен fallback timeout триггер на ${this.configService.getDefaultTriggerTimeoutMinutes()} минут. Пара продолжит отслеживаться.`,
+                );
+              }
+
               this.logger.debug(`[${pair}] LLM_Triggers обновлены для пары: ${llmResponse.update_triggers_for_pair}`);
 
-              // Отправляем уведомление об обновлении триггеров
+              // Отправляем уведомление об обновлении триггеров (используем сохраненные значения, возможно с fallback)
               if (this.notificationService.sendTriggersUpdate) {
                 this.notificationService.sendTriggersUpdate(
                   llmResponse.update_triggers_for_pair,
-                  llmResponse.next_call_triggers.reason,
-                  llmResponse.next_call_triggers.trigger_conditions,
+                  reasonToSave,
+                  triggerConditionsToSave,
                   llmResponse.request_additional_data,
                   new Date(),
                 );

@@ -285,6 +285,10 @@ export class LLMRequestAssemblerService {
     );
 
     // Шаг A.1: Получение последних отклоненных решений для этой пары (для обратной связи модели)
+    const isRetryRequest = reason.includes('ПОВТОРНЫЙ ЗАПРОС');
+    if (isRetryRequest) {
+      this.logger.info(`[${triggeredPair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Запрос информации об отклоненных решениях из БД...`);
+    }
     const recentRejectionsResult = await this.databaseService.query(
       `SELECT 
         id, 
@@ -352,6 +356,23 @@ export class LLMRequestAssemblerService {
         });
       } catch (error) {
         this.logger.warn(`Failed to parse rejection info from LLM_Decision_Log: ${error}`);
+      }
+    }
+
+    if (isRetryRequest) {
+      if (recentRejections.length > 0) {
+        this.logger.info(
+          `[${triggeredPair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Найдено ${recentRejections.length} отклоненных решений. Информация будет включена в запрос к LLM.`,
+        );
+        for (const rejection of recentRejections) {
+          this.logger.debug(
+            `[${triggeredPair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Отклонено решение ${rejection.decisions.map((d) => d.action).join(', ')}. Причина: ${rejection.error_message}`,
+          );
+        }
+      } else {
+        this.logger.warn(
+          `[${triggeredPair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Не найдено отклоненных решений в БД за последние 24 часа.`,
+        );
       }
     }
 

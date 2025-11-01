@@ -92,7 +92,8 @@ export class NotificationService {
     // Находим последний пробел для красивого обрезания
     const lastSpace = truncated.lastIndexOf(' ');
     const cutPoint = lastSpace > maxLength * 0.8 ? lastSpace : truncated.length;
-    return `${text.substring(0, cutPoint)}...\n\\(сообщение обрезано\\)`;
+    // НЕ экранируем здесь - экранирование будет выполнено позже в _escapeMarkdown
+    return `${text.substring(0, cutPoint)}...\n(сообщение обрезано)`;
   }
 
   /**
@@ -185,7 +186,9 @@ export class NotificationService {
         if (this.bot && this.chatId) {
           for (let i = 0; i < messageParts.length; i++) {
             const part = messageParts[i];
-            const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
+            // Экранируем partNumber отдельно для безопасности
+            const partNumber =
+              messageParts.length > 1 ? ` ${this._escapeMarkdown(`(часть ${i + 1}/${messageParts.length})`)}` : '';
             await this._sendMessageWithRetry(this.chatId, part + partNumber, {
               parse_mode: 'MarkdownV2',
             });
@@ -444,7 +447,9 @@ export class NotificationService {
         if (this.bot && this.chatId) {
           for (let i = 0; i < messageParts.length; i++) {
             const part = messageParts[i];
-            const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
+            // Экранируем partNumber отдельно для безопасности
+            const partNumber =
+              messageParts.length > 1 ? ` ${this._escapeMarkdown(`(часть ${i + 1}/${messageParts.length})`)}` : '';
             await this._sendMessageWithRetry(this.chatId, part + partNumber, {
               parse_mode: 'MarkdownV2',
             });
@@ -641,7 +646,9 @@ export class NotificationService {
         if (this.bot && this.chatId) {
           for (let i = 0; i < messageParts.length; i++) {
             const part = messageParts[i];
-            const partNumber = messageParts.length > 1 ? ` \\(часть ${i + 1}/${messageParts.length}\\)` : '';
+            // Экранируем partNumber отдельно для безопасности
+            const partNumber =
+              messageParts.length > 1 ? ` ${this._escapeMarkdown(`(часть ${i + 1}/${messageParts.length})`)}` : '';
             await this._sendMessageWithRetry(this.chatId, part + partNumber, {
               parse_mode: 'MarkdownV2',
             });

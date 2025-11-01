@@ -57,8 +57,9 @@ export class GuaranteedOrderExecutionService {
     }
 
     // Генерация clientOrderId для идемпотентности
-    const clientOrderId = `llm-trader-${crypto.randomUUID()}`;
-    const clientOrderIdShort = clientOrderId.substring(11, 19);
+    // UUID без дефисов (32 символа) - соответствует требованиям Binance (максимум 36 символов)
+    const clientOrderId = crypto.randomUUID().replace(/-/g, '');
+    const clientOrderIdShort = clientOrderId.substring(0, 8);
 
     try {
       // Попытка 1: Создание ордера
@@ -89,18 +90,29 @@ export class GuaranteedOrderExecutionService {
 
       for (let i = 1; i <= RETRY_ATTEMPTS; i++) {
         await this.sleep(RETRY_DELAY_MS * i); // Exponential backoff
-        this.logger.warn(
-          `[${pair}] Попытка ${i}/${RETRY_ATTEMPTS}: Проверка статуса ордера (fetchOrder by Client ID)...`,
-        );
+        this.logger.warn(`[${pair}] Попытка ${i}/${RETRY_ATTEMPTS}: Проверка статуса ордера (поиск по Client ID)...`);
 
         try {
-          const order = await this.exchangeService.fetchOrder(clientOrderId, pair);
-          // УСПЕХ: Ордер был создан, биржа вернула его
-          this.logger.info(`[${pair}] (Успех Retry) Ордер ${order.id} подтвержден.`);
-          return order;
+          // Ищем ордер по clientOrderId среди открытых ордеров
+          const openOrders = await this.exchangeService.fetchOpenOrders(pair);
+          const foundOrder = openOrders.find((order) => order.clientOrderId === clientOrderId);
+
+          if (foundOrder) {
+            // УСПЕХ: Ордер был создан, биржа вернула его
+            this.logger.info(
+              `[${pair}] (Успех Retry) Ордер ${foundOrder.id} подтвержден по Client ID ${clientOrderIdShort}.`,
+            );
+            return foundOrder;
+          }
+
+          // Ордер не найден среди открытых - возможно, он уже исполнен
+          // В этом случае считаем, что ордер не был создан из-за сетевой ошибки
+          this.logger.warn(
+            `[${pair}] (Провал Retry ${i}) Ордер с Client ID ${clientOrderIdShort} не найден среди открытых ордеров.`,
+          );
         } catch (fetchError) {
-          // Провал: Ордер не найден или снова NetworkError
-          this.logger.error(`[${pair}] (Провал Retry ${i}):`, fetchError);
+          // Провал: Ошибка при получении списка ордеров
+          this.logger.error(`[${pair}] (Провал Retry ${i}) Ошибка при поиске ордера:`, fetchError);
         }
       }
 

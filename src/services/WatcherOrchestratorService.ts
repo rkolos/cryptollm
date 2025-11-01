@@ -61,6 +61,8 @@ export class WatcherOrchestratorService {
   private readonly accountStateService: AccountStateService;
   private readonly configService: ConfigService;
   private readonly marketDataService: MarketDataService;
+  // Счетчик глубины рекурсии для повторных запросов (максимум 3 попытки на пару)
+  private readonly retryDepth: Map<string, number> = new Map();
 
   private constructor(
     databaseService: DatabaseService,
@@ -123,17 +125,54 @@ export class WatcherOrchestratorService {
    * Не является async, так как вызывается в режиме "fire-and-forget".
    */
   public executeOrchestration(pair: string, triggerReason: string): void {
-    this.logger.info(`[${pair}] executeOrchestration вызван. Причина: ${triggerReason}`);
+    const isRetryRequest = triggerReason.includes('ПОВТОРНЫЙ ЗАПРОС');
+
+    // Проверка глубины рекурсии для повторных запросов
+    if (isRetryRequest) {
+      const currentDepth = this.retryDepth.get(pair) || 0;
+      const maxRetryDepth = 3;
+
+      if (currentDepth >= maxRetryDepth) {
+        this.logger.error(
+          `[${pair}] Достигнут максимальный лимит повторных запросов (${maxRetryDepth}). Прерывание цепочки повторных запросов.`,
+        );
+        this.notificationService.sendAlert(
+          `[${pair}] КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: Достигнут максимальный лимит повторных запросов (${maxRetryDepth}). Дальнейшие повторные запросы для этой пары будут игнорироваться.`,
+          false,
+        );
+        // Сбрасываем счетчик для этой пары
+        this.retryDepth.delete(pair);
+        return;
+      }
+
+      // Увеличиваем счетчик глубины
+      this.retryDepth.set(pair, currentDepth + 1);
+      this.logger.info(
+        `[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС к LLM после отклонения валидатором (глубина: ${currentDepth + 1}/${maxRetryDepth})`,
+      );
+    } else {
+      // Для обычных запросов сбрасываем счетчик
+      this.retryDepth.delete(pair);
+    }
+
+    this.logger.info(
+      `[${pair}] executeOrchestration вызван. Причина: ${triggerReason.substring(0, 100)}${triggerReason.length > 100 ? '...' : ''}`,
+    );
 
     // Уведомление о срабатывании триггера
     this.notificationService.sendAlert(`🔔 ТРИГГЕР СРАБОТАЛ: ${pair}\nПричина: ${triggerReason}`, false);
 
     // Враппер: Вся логика внутри PairActorManager для контроля конкурентности
+    // ВАЖНО: Promise от pairActorManager.execute() должен быть обработан для логирования ошибок
     this.pairActorManager
       .execute(pair, async () => {
         try {
           // Шаг 1: Сборка запроса
-          this.logger.info(`[${pair}] Начало оркестрации. Причина: ${triggerReason}`);
+          if (isRetryRequest) {
+            this.logger.info(`[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Начало сборки запроса к LLM...`);
+          } else {
+            this.logger.info(`[${pair}] Начало оркестрации. Причина: ${triggerReason}`);
+          }
           let requestPayload;
           try {
             this.logger.debug(`[${pair}] Начало сборки запроса к LLM...`);
@@ -172,11 +211,23 @@ export class WatcherOrchestratorService {
               question: requestPayload.user_prompt,
             };
 
-            this.logger.info(`[${pair}] Отправка запроса в LLM...`);
+            if (isRetryRequest) {
+              this.logger.info(
+                `[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Отправка запроса в LLM с учетом отклоненного решения...`,
+              );
+            } else {
+              this.logger.info(`[${pair}] Отправка запроса в LLM...`);
+            }
             llmResponse = await this.llmService.ask(llmRequest);
-            this.logger.info(
-              `[${pair}] Получен ответ от LLM. Решений: ${llmResponse.decisions.length}, обновление триггеров для: ${llmResponse.update_triggers_for_pair}`,
-            );
+            if (isRetryRequest) {
+              this.logger.info(
+                `[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Получен ответ от LLM. Решений: ${llmResponse.decisions.length}, обновление триггеров для: ${llmResponse.update_triggers_for_pair}`,
+              );
+            } else {
+              this.logger.info(
+                `[${pair}] Получен ответ от LLM. Решений: ${llmResponse.decisions.length}, обновление триггеров для: ${llmResponse.update_triggers_for_pair}`,
+              );
+            }
 
             // Уведомление об успешном вызове LLM
             const decisionsCount = llmResponse.decisions.length;
@@ -299,10 +350,29 @@ export class WatcherOrchestratorService {
           }
 
           // Шаг 5: Исполнение решений
+          // Проверка llmLogId перед использованием
+          if (!llmLogId) {
+            this.logger.warn(
+              `[${pair}] КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: llmLogId отсутствует. Исполнение будет продолжено с пустым ID лога.`,
+            );
+            llmLogId = '';
+          }
+
+          if (isRetryRequest && llmResponse.decisions.length > 0) {
+            this.logger.info(
+              `[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Получено ${llmResponse.decisions.length} решений. Передача в Worker для валидации...`,
+            );
+          }
           for (const decision of llmResponse.decisions) {
             try {
               await this.workerService.execute(decision, llmLogId, accountState, strategyContext, marketData);
-              this.logger.debug(`[${pair}] Решение [${decision.action}] передано в WorkerService.`);
+              if (isRetryRequest) {
+                this.logger.info(
+                  `[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Решение [${decision.action}] передано в WorkerService.`,
+                );
+              } else {
+                this.logger.debug(`[${pair}] Решение [${decision.action}] передано в WorkerService.`);
+              }
             } catch (error) {
               // Worker сам обрабатывает ошибки и обновляет LLM_Decision_Log
               // Логируем здесь только для отладки
@@ -321,37 +391,194 @@ export class WatcherOrchestratorService {
               if (hasOpenPositionDecisions) {
                 // Проверяем финальный статус лога после выполнения всех решений
                 const logCheckResult = await this.databaseService.query(
-                  'SELECT decision_result FROM LLM_Decision_Log WHERE id = $1',
+                  'SELECT decision_result, validator_error_message FROM LLM_Decision_Log WHERE id = $1',
                   [llmLogId],
                 );
 
                 if (logCheckResult.rows.length > 0) {
                   const finalStatus = logCheckResult.rows[0].decision_result;
+                  const validatorErrorMessage = logCheckResult.rows[0].validator_error_message;
 
-                  // Если решение на открытие позиции отклонено валидатором, удаляем триггеры
-                  // (WorkerService обновляет статус на 'rejected_by_validator' при отклонении)
-                  // Это означает, что позиция не была открыта, и триггеры для её отслеживания не имеют смысла
-                  if (finalStatus === 'rejected_by_validator') {
-                    this.logger.warn(
-                      `[${pair}] Решение на открытие позиции отклонено валидатором. Удаление триггеров для пары ${llmResponse.update_triggers_for_pair}...`,
-                    );
+                  // Проверяем, было ли автоматическое исполнение
+                  const isAutoExecution =
+                    validatorErrorMessage &&
+                    (validatorErrorMessage.includes('АВТОМАТИЧЕСКОЕ ИСПОЛНЕНИЕ') ||
+                      validatorErrorMessage.includes('✅'));
 
-                    await this.databaseService.query('DELETE FROM LLM_Triggers WHERE pair = $1', [
-                      llmResponse.update_triggers_for_pair,
-                    ]);
-
+                  // Если это было автоматическое исполнение, не отправляем повторный запрос
+                  if (isAutoExecution) {
                     this.logger.info(
-                      `[${pair}] Триггеры удалены для пары ${llmResponse.update_triggers_for_pair} из-за отклонения решения на открытие позиции валидатором.`,
+                      `[${pair}] Решение было автоматически исполнено. Повторный запрос к LLM не требуется.`,
                     );
+                    // Пропускаем всю логику переспрашивания для автоматически исполненных сделок
+                  } else if (finalStatus === 'rejected_by_validator') {
+                    // Если решение на открытие позиции отклонено валидатором, удаляем триггеры
+                    // (WorkerService обновляет статус на 'rejected_by_validator' при отклонении)
+                    // Это означает, что позиция не была открыта, и триггеры для её отслеживания не имеют смысла
+                    // Находим все решения на открытие позиции для определения пар, для которых нужно удалить триггеры
+                    const openPositionDecisions = llmResponse.decisions.filter(
+                      (d) => d.action === 'OPEN_LONG' || d.action === 'OPEN_SHORT',
+                    );
+
+                    // Удаляем триггеры для пар с отклоненными решениями на открытие позиции
+                    // Используем пары из решений, а также update_triggers_for_pair для полноты
+                    const pairsToClean = new Set<string>();
+                    openPositionDecisions.forEach((d) => pairsToClean.add(d.pair));
+                    if (llmResponse.update_triggers_for_pair) {
+                      pairsToClean.add(llmResponse.update_triggers_for_pair);
+                    }
+
+                    for (const pairToClean of pairsToClean) {
+                      this.logger.warn(
+                        `[${pair}] Решение на открытие позиции отклонено валидатором. Удаление триггеров для пары ${pairToClean}...`,
+                      );
+
+                      await this.databaseService.query('DELETE FROM LLM_Triggers WHERE pair = $1', [pairToClean]);
+
+                      this.logger.info(
+                        `[${pair}] Триггеры удалены для пары ${pairToClean} из-за отклонения решения на открытие позиции валидатором.`,
+                      );
+                    }
 
                     // Уведомление о удалении триггеров
                     this.notificationService.sendAlert(
-                      `⚠️ [${pair}] Решение на открытие позиции отклонено валидатором. Триггеры для ${llmResponse.update_triggers_for_pair} удалены, так как позиция не была открыта.`,
+                      `⚠️ [${pair}] Решение на открытие позиции отклонено валидатором. Триггеры для ${Array.from(pairsToClean).join(', ')} удалены, так как позиция не была открыта.`,
                       false,
                     );
 
                     // Обновляем кэш AccountStateService, чтобы удалить триггеры из памяти
                     await this.accountStateService.refreshNow();
+
+                    // Получаем актуальное состояние счета для формирования детального описания проблемы
+                    const currentAccountState = this.accountStateService.getAccountState();
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const availableBalance = currentAccountState.available_quote_balance as any;
+                    const availableBalanceNumber = availableBalance?.toNumber?.() || 0;
+
+                    // Формируем детальный retryReason для каждой пары с отклоненным решением
+                    for (const rejectedDecision of openPositionDecisions) {
+                      const rejectedPair = rejectedDecision.pair;
+
+                      // ВАЖНО: Проверяем, что повторный запрос не вызывается для той же пары, которая уже обрабатывается
+                      // Это может привести к проблемам с очередью PairActorManager
+                      if (rejectedPair === pair) {
+                        this.logger.warn(
+                          `[${pair}] Повторный запрос для ${rejectedPair} пропущен, так как эта пара уже обрабатывается в текущей задаче. Запрос будет выполнен после завершения текущей задачи.`,
+                        );
+                      }
+
+                      // Формируем детальное описание отклоненного решения
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      const decisionParams = rejectedDecision.parameters as any;
+                      const decisionParamsText: string[] = [];
+                      if (decisionParams) {
+                        if (decisionParams.risk_percent !== undefined) {
+                          decisionParamsText.push(`risk_percent: ${decisionParams.risk_percent}%`);
+                        }
+                        if (decisionParams.stop_loss_price !== undefined) {
+                          decisionParamsText.push(`stop_loss_price: ${decisionParams.stop_loss_price}`);
+                        }
+                        if (decisionParams.take_profit_price !== undefined) {
+                          decisionParamsText.push(`take_profit_price: ${decisionParams.take_profit_price}`);
+                        }
+                        if (decisionParams.amount_percent !== undefined) {
+                          decisionParamsText.push(`amount_percent: ${decisionParams.amount_percent}%`);
+                        }
+                      }
+
+                      // Формируем детальный retryReason с полной информацией о проблеме
+                      let retryReason = `ПОВТОРНЫЙ ЗАПРОС: Предыдущее решение было отклонено валидатором.\n\n`;
+                      retryReason += `**Отклоненное решение:**\n`;
+                      retryReason += `- Действие: ${rejectedDecision.action} (${rejectedPair})\n`;
+                      if (rejectedDecision.justification) {
+                        retryReason += `- Обоснование: ${rejectedDecision.justification}\n`;
+                      }
+                      if (decisionParamsText.length > 0) {
+                        retryReason += `- Параметры: ${decisionParamsText.join(', ')}\n`;
+                      }
+                      retryReason += `\n**Причина отклонения:** ${validatorErrorMessage || 'Не указана'}\n\n`;
+
+                      retryReason += `**Текущее состояние счета:**\n`;
+                      retryReason += `- Доступный баланс: $${availableBalanceNumber.toFixed(2)}\n`;
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      const totalPortfolio = currentAccountState.total_portfolio_value_usdt as any;
+                      const totalPortfolioNumber = totalPortfolio?.toNumber?.() || 0;
+                      retryReason += `- Общая стоимость портфеля: $${totalPortfolioNumber.toFixed(2)}\n`;
+
+                      const riskRules = this.configService.getRiskRules();
+                      retryReason += `- Максимальный риск на сделку: ${riskRules.maxAllowedRiskPercent}%\n`;
+                      retryReason += `- Желаемое соотношение риск/прибыль: ${riskRules.desiredRiskRewardRatio}\n\n`;
+
+                      retryReason += `**Рекомендации:**\n`;
+                      if (
+                        validatorErrorMessage?.includes('превышает доступный баланс') ||
+                        validatorErrorMessage?.includes('превышает')
+                      ) {
+                        retryReason += `- Уменьши risk_percent или amount_percent, чтобы рассчитанная стоимость ордера не превышала доступный баланс $${availableBalanceNumber.toFixed(2)}\n`;
+                        retryReason += `- Учитывай, что доступно только $${availableBalanceNumber.toFixed(2)}, а не весь портфель\n`;
+                      } else if (
+                        validatorErrorMessage?.includes('минимальная') ||
+                        validatorErrorMessage?.includes('minimum')
+                      ) {
+                        retryReason += `- Увеличь сумму сделки до минимально допустимого значения биржи\n`;
+                      } else if (
+                        validatorErrorMessage?.includes('максимальная') ||
+                        validatorErrorMessage?.includes('maximum')
+                      ) {
+                        retryReason += `- Уменьши сумму сделки до максимально допустимого значения биржи\n`;
+                      } else {
+                        retryReason += `- Изучи причину отклонения и скорректируй параметры решения соответственно\n`;
+                      }
+                      retryReason += `- Убедись, что все параметры соответствуют правилам биржи и ограничениям риска\n`;
+                      retryReason += `- Учитывай текущий баланс $${availableBalanceNumber.toFixed(2)} при расчете размера позиции\n\n`;
+
+                      retryReason += `**Требуется:** Принять новое обоснованное решение с учетом указанных ограничений и причин отклонения.`;
+
+                      this.logger.info(
+                        `[${pair}] Отправка повторного запроса к LLM после отклонения валидатором для пары ${rejectedPair}`,
+                      );
+                      this.logger.debug(`[${pair}] Детальная причина повторного запроса: ${retryReason}`);
+
+                      // ВАЖНО: Повторный запрос вызывается ПОСЛЕ завершения текущей задачи
+                      // PairActorManager гарантирует, что задачи для одной пары выполняются последовательно
+                      // Поэтому повторный запрос будет выполнен после завершения текущей задачи
+                      // Триггеры уже удалены, но это нормально - повторный запрос создаст новые триггеры при успешном ответе LLM
+                      this.logger.info(
+                        `[${pair}] Повторный запрос для ${rejectedPair} будет добавлен в очередь PairActorManager. Выполнение начнется после завершения текущей задачи.`,
+                      );
+                      try {
+                        // Используем setTimeout для асинхронного вызова вместо прямой рекурсии
+                        // Это предотвращает переполнение стека и дает возможность другим задачам выполниться
+                        setTimeout(() => {
+                          try {
+                            this.executeOrchestration(rejectedPair, retryReason);
+                            this.logger.debug(
+                              `[${pair}] executeOrchestration вызван для повторного запроса ${rejectedPair} (асинхронно). Ожидание выполнения в очереди...`,
+                            );
+                          } catch (error) {
+                            // Ошибка при выполнении повторного запроса
+                            this.logger.error(
+                              `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Ошибка при выполнении повторного запроса для ${rejectedPair}:`,
+                              error,
+                            );
+                            // Сбрасываем счетчик глубины при ошибке
+                            this.retryDepth.delete(rejectedPair);
+                          }
+                        }, 0);
+                      } catch (error) {
+                        // Ошибка при попытке запустить повторный запрос (например, ошибка при создании задачи в PairActorManager)
+                        this.logger.error(
+                          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Не удалось запустить повторный запрос для ${rejectedPair}:`,
+                          error,
+                        );
+                        this.notificationService.sendAlert(
+                          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: Не удалось запустить повторный запрос для ${rejectedPair}. ${String(error)}`,
+                          false,
+                        );
+                        // Сбрасываем счетчик глубины при ошибке
+                        this.retryDepth.delete(rejectedPair);
+                      }
+                    }
                   }
                 }
               }
@@ -375,7 +602,11 @@ export class WatcherOrchestratorService {
             this.logger.debug(`[${pair}] Нет решений для исполнения. Пост-синхронизация не требуется.`);
           }
 
-          this.logger.info(`[${pair}] Оркестрация завершена успешно.`);
+          if (isRetryRequest) {
+            this.logger.info(`[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: Оркестрация завершена успешно.`);
+          } else {
+            this.logger.info(`[${pair}] Оркестрация завершена успешно.`);
+          }
         } catch (error) {
           // Фатальный сбой в акторе
           this.logger.error(`[${pair}] ФАТАЛЬНАЯ ОШИБКА в акторе:`, error);
@@ -389,8 +620,18 @@ export class WatcherOrchestratorService {
       })
       .catch((error) => {
         // Внешний обработчик для критических ошибок PairActorManager
-        this.logger.error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА PairActorManager:`, error);
-        this.notificationService.sendAlert(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА PairActorManager: ${String(error)}`, false);
+        // Обрабатываем ошибки как для обычных, так и для повторных запросов
+        const isRetryError = triggerReason.includes('ПОВТОРНЫЙ ЗАПРОС');
+        if (isRetryError) {
+          this.logger.error(`[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: КРИТИЧЕСКАЯ ОШИБКА PairActorManager:`, error);
+          this.notificationService.sendAlert(
+            `[${pair}] 🔄 ПОВТОРНЫЙ ЗАПРОС: КРИТИЧЕСКАЯ ОШИБКА PairActorManager: ${String(error)}`,
+            false,
+          );
+        } else {
+          this.logger.error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА PairActorManager:`, error);
+          this.notificationService.sendAlert(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА PairActorManager: ${String(error)}`, false);
+        }
       });
   }
 }

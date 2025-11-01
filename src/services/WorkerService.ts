@@ -336,6 +336,11 @@ export class WorkerService {
     const amountDecimal = new DecimalConstructor(realAmount.toString());
     const feeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
 
+    // ОБНОВЛЯЕМ баланс после создания market ордера
+    // Добавляем небольшую задержку для гарантии обновления баланса на бирже
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await this.accountStateService.refreshNow();
+
     // --- Шаг 2: Создание SL/TP ордеров ДО транзакции БД ---
     let slOrder: IDecimalOrder | null = null;
     let tpOrder: IDecimalOrder | null = null;
@@ -343,32 +348,72 @@ export class WorkerService {
     try {
       // Создаем SL
       if (stop_loss_price !== null && stop_loss_price !== undefined) {
-        const slPriceDecimal = new DecimalConstructor(stop_loss_price.toString());
-        const slPriceParams = { stopPrice: slPriceDecimal.toNumber() };
+        try {
+          const slPriceDecimal = new DecimalConstructor(stop_loss_price.toString());
+          const slPriceParams = { stopPrice: slPriceDecimal.toNumber() };
 
-        slOrder = await this.executionService.createOrderWithRetry(
-          pair,
-          'stop_loss_limit',
-          oppositeSide,
-          amountDecimal,
-          slPriceDecimal,
-          slPriceParams,
-        );
-        this.logger.debug(`[${pair}] SL ордер ${slOrder.id} создан на бирже.`);
+          slOrder = await this.executionService.createOrderWithRetry(
+            pair,
+            'stop_loss_limit',
+            oppositeSide,
+            amountDecimal,
+            slPriceDecimal,
+            slPriceParams,
+          );
+          this.logger.debug(`[${pair}] SL ордер ${slOrder.id} создан на бирже.`);
+        } catch (slError) {
+          // Если не удалось создать SL из-за недостатка средств, логируем предупреждение
+          const slErrorMessage = slError instanceof Error ? slError.message : String(slError);
+          // Расширенная проверка различных вариантов ошибок недостатка средств
+          const isInsufficientFundsError =
+            slErrorMessage.includes('Insufficient funds') ||
+            slErrorMessage.includes('insufficient balance') ||
+            slErrorMessage.includes('InsufficientFundsError') ||
+            (slError instanceof Error && slError.name === 'InsufficientFundsError');
+
+          if (isInsufficientFundsError) {
+            this.logger.warn(
+              `[${pair}] Не удалось создать SL ордер из-за недостатка средств: ${slErrorMessage}. Продолжаем без SL.`,
+            );
+            slOrder = null;
+          } else {
+            throw slError; // Пробрасываем другие ошибки
+          }
+        }
       }
 
       // Создаем TP
       if (take_profit_price !== null && take_profit_price !== undefined) {
-        const tpPriceDecimal = new DecimalConstructor(take_profit_price.toString());
+        try {
+          const tpPriceDecimal = new DecimalConstructor(take_profit_price.toString());
 
-        tpOrder = await this.executionService.createOrderWithRetry(
-          pair,
-          'limit',
-          oppositeSide,
-          amountDecimal,
-          tpPriceDecimal,
-        );
-        this.logger.debug(`[${pair}] TP ордер ${tpOrder.id} создан на бирже.`);
+          tpOrder = await this.executionService.createOrderWithRetry(
+            pair,
+            'limit',
+            oppositeSide,
+            amountDecimal,
+            tpPriceDecimal,
+          );
+          this.logger.debug(`[${pair}] TP ордер ${tpOrder.id} создан на бирже.`);
+        } catch (tpError) {
+          // Если не удалось создать TP из-за недостатка средств, логируем предупреждение
+          const tpErrorMessage = tpError instanceof Error ? tpError.message : String(tpError);
+          // Расширенная проверка различных вариантов ошибок недостатка средств
+          const isInsufficientFundsError =
+            tpErrorMessage.includes('Insufficient funds') ||
+            tpErrorMessage.includes('insufficient balance') ||
+            tpErrorMessage.includes('InsufficientFundsError') ||
+            (tpError instanceof Error && tpError.name === 'InsufficientFundsError');
+
+          if (isInsufficientFundsError) {
+            this.logger.warn(
+              `[${pair}] Не удалось создать TP ордер из-за недостатка средств: ${tpErrorMessage}. Продолжаем без TP.`,
+            );
+            tpOrder = null;
+          } else {
+            throw tpError; // Пробрасываем другие ошибки
+          }
+        }
       }
 
       // --- Шаг 3: Сохранение Состояния в БД (Атомарно) ---

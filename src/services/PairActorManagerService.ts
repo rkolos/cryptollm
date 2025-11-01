@@ -30,6 +30,13 @@ export class PairActorManagerService {
     // 1. Получаем "хвост" очереди для этой пары.
     // Если очереди нет, начинаем с уже разрешенного Promise.
     const previousTask = this.promiseQueues.get(pair) || Promise.resolve();
+    const hasPreviousTask = this.promiseQueues.has(pair);
+
+    if (hasPreviousTask) {
+      this.logger.debug(`[${pair}] Задача добавлена в очередь. Ожидание завершения предыдущей задачи...`);
+    } else {
+      this.logger.debug(`[${pair}] Задача добавлена в очередь. Выполнение начнется немедленно.`);
+    }
 
     // 2. Создаем обертку для задачи, которая ждет предыдущую и выполняет текущую
     const taskWrapper = async (): Promise<T> => {
@@ -37,9 +44,19 @@ export class PairActorManagerService {
         // 3. (Критично) Ждем, пока предыдущая задача завершится.
         // Мы используем .catch(), чтобы дождаться завершения,
         // даже если предыдущая задача упала с ошибкой.
-        await previousTask.catch(() => {
-          // Игнорируем ошибку предыдущей задачи, чтобы не сломать цепочку
+        if (hasPreviousTask) {
+          this.logger.debug(`[${pair}] Ожидание завершения предыдущей задачи в очереди...`);
+        }
+        await previousTask.catch((error) => {
+          // Логируем ошибку предыдущей задачи для отладки, но не прерываем цепочку
+          this.logger.warn(
+            `[${pair}] Предыдущая задача в очереди завершилась с ошибкой (цепочка продолжается):`,
+            error,
+          );
         });
+        if (hasPreviousTask) {
+          this.logger.debug(`[${pair}] Предыдущая задача завершена. Начало выполнения текущей задачи...`);
+        }
       } catch (e) {
         // Эта ошибка никогда не должна произойти,
         // но на всякий случай логируем.

@@ -154,21 +154,51 @@ export class SlowCycleService {
       this.logger.info('(SlowCycle) Тик ЗАПУЩЕН.');
 
       // Шаг 1: Обновление кэша
-      await this.accountStateService.refreshNow();
+      try {
+        this.logger.debug('(SlowCycle) Шаг 1: Обновление кэша AccountState...');
+        await this.accountStateService.refreshNow();
+        this.logger.debug('(SlowCycle) Шаг 1: Обновление кэша завершено.');
+      } catch (error) {
+        this.logger.error('(SlowCycle) Ошибка при обновлении кэша AccountState:', error);
+        // Продолжаем выполнение, так как это не критично
+      }
 
       // Шаг 2: Плановая сверка
-      await this.syncEngine.reconcileStateAll();
+      try {
+        this.logger.debug('(SlowCycle) Шаг 2: Плановая сверка...');
+        await this.syncEngine.reconcileStateAll();
+        this.logger.debug('(SlowCycle) Шаг 2: Плановая сверка завершена.');
+      } catch (error) {
+        this.logger.error('(SlowCycle) Ошибка при плановой сверке:', error);
+        // Продолжаем выполнение, так как это не критично
+      }
 
       // Шаг 3: Проверка триггеров
-      await this._checkTriggers();
+      try {
+        this.logger.debug('(SlowCycle) Шаг 3: Проверка триггеров...');
+        await this._checkTriggers();
+        this.logger.debug('(SlowCycle) Шаг 3: Проверка триггеров завершена.');
+      } catch (error) {
+        this.logger.error('(SlowCycle) Ошибка при проверке триггеров:', error);
+        // Продолжаем выполнение, так как это не критично
+      }
 
       // Шаг 4: Аварийный SL (Stop-Loss Janitor)
-      await this._runStopLossJanitor();
+      try {
+        this.logger.debug('(SlowCycle) Шаг 4: Stop-Loss Janitor...');
+        await this._runStopLossJanitor();
+        this.logger.debug('(SlowCycle) Шаг 4: Stop-Loss Janitor завершен.');
+      } catch (error) {
+        this.logger.error('(SlowCycle) Ошибка в Stop-Loss Janitor:', error);
+        // Продолжаем выполнение, так как это не критично
+      }
 
       this.logger.info('(SlowCycle) Тик ЗАВЕРШЕН.');
     } catch (error) {
       this.logger.error(`(SlowCycle) КРИТИЧЕСКИЙ СБОЙ "Медленного Цикла": ${String(error)}`, error);
       // Не бросаем ошибку, чтобы setInterval() продолжил работу
+      // Но все равно логируем завершение тика для диагностики
+      this.logger.info('(SlowCycle) Тик ЗАВЕРШЕН (с ошибками).');
     }
   }
 
@@ -283,10 +313,13 @@ export class SlowCycleService {
             // Проверка indicator триггеров
             if (condition.type === 'indicator' && condition.name && condition.timeframe) {
               try {
+                this.logger.debug(
+                  `(SlowCycle) [${pair}] Проверка индикатора ${condition.name} (timeframe: ${condition.timeframe})...`,
+                );
                 const ohlcv = await this.marketDataService.fetchOHLCV(pair, condition.timeframe, undefined, 50);
                 if (ohlcv.length === 0) {
                   this.logger.warn(`(SlowCycle) [${pair}] Недостаточно данных OHLCV для проверки индикатора.`);
-                  continue;
+                  continue; // Пропускаем этот индикатор, но продолжаем проверку других условий
                 }
 
                 const analysis = this.taEngineService.getAnalysis(ohlcv, []);
@@ -295,6 +328,9 @@ export class SlowCycleService {
                 if (condition.name === 'rsi') {
                   const rsiValue = this._getAnalysisValue(analysis, condition.timeframe, 'rsi');
                   if (rsiValue !== null) {
+                    this.logger.debug(
+                      `(SlowCycle) [${pair}] RSI(${condition.timeframe}) = ${rsiValue}, проверка условия: ${condition.condition} ${condition.value}`,
+                    );
                     // condition.condition может быть 'below' или 'above'
                     if (condition.condition === 'below' && rsiValue < condition.value) {
                       triggerHit = true;
@@ -307,14 +343,17 @@ export class SlowCycleService {
                         `(SlowCycle) [${pair}] Сработал indicator триггер: RSI(${condition.timeframe}) = ${rsiValue} > ${condition.value}`,
                       );
                     }
+                  } else {
+                    this.logger.debug(`(SlowCycle) [${pair}] RSI значение не найдено в анализе.`);
                   }
                 }
                 // Можно добавить другие индикаторы здесь
               } catch (indicatorError) {
                 this.logger.error(
-                  `(SlowCycle) [${pair}] Ошибка при проверке индикатора ${condition.name}:`,
+                  `(SlowCycle) [${pair}] Ошибка при проверке индикатора ${condition.name} (timeframe: ${condition.timeframe}):`,
                   indicatorError,
                 );
+                // Продолжаем проверку других условий для этой пары, не прерываем весь цикл
                 continue;
               }
             }
@@ -370,19 +409,36 @@ export class SlowCycleService {
     try {
       const accountState = this.accountStateService.getAccountState();
       if (!accountState.open_positions || accountState.open_positions.length === 0) {
+        this.logger.debug('(StopLossJanitor) Нет открытых позиций, проверка не требуется.');
         return;
       }
 
+      this.logger.debug(`(StopLossJanitor) Проверка ${accountState.open_positions.length} открытых позиций...`);
+
       // Получаем тикеры для всех пар из watchlist
+      // Используем Promise.allSettled вместо Promise.all, чтобы ошибки сети не блокировали проверку
       const watchlist = this.configService.getWatchlist();
       const tickerPromises = watchlist.map((pair) => this.exchangeService.fetchTicker(pair));
-      const tickers = await Promise.all(tickerPromises);
+      const tickerResults = await Promise.allSettled(tickerPromises);
 
       // Создаем Map для быстрого поиска тикеров по паре
       const tickerMap = new Map<string, IDecimalTicker>();
-      for (const ticker of tickers) {
-        tickerMap.set(ticker.symbol, ticker);
+      let successfulTickers = 0;
+      for (let i = 0; i < tickerResults.length; i++) {
+        const result = tickerResults[i];
+        if (!result) {
+          continue;
+        }
+        if (result.status === 'fulfilled') {
+          tickerMap.set(result.value.symbol, result.value);
+          successfulTickers++;
+        } else if (result.status === 'rejected') {
+          const pair = watchlist[i];
+          this.logger.warn(`(StopLossJanitor) Не удалось получить тикер для ${pair}: ${String(result.reason)}`);
+        }
       }
+
+      this.logger.debug(`(StopLossJanitor) Получено ${successfulTickers}/${watchlist.length} тикеров успешно.`);
 
       // Проверяем каждую позицию
       for (const position of accountState.open_positions) {
@@ -483,6 +539,8 @@ export class SlowCycleService {
       }
     } catch (error) {
       this.logger.error('(StopLossJanitor) Критическая ошибка:', error);
+      // Не пробрасываем ошибку дальше, чтобы не блокировать завершение тика SlowCycle
+      // Логируем для диагностики, но продолжаем работу
     }
   }
 }

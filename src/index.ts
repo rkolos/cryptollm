@@ -125,6 +125,8 @@ async function main(): Promise<void> {
     notificationService = NotificationService.getInstance(config);
     notificationService.injectAccountStateService(accountStateService);
     notificationService.injectDatabaseService(databaseService);
+    notificationService.injectExchangeService(exchangeService);
+    notificationService.injectExchangeRulesService(exchangeRulesService);
     // Сохраняем ссылку в глобальной области для handleShutdown
     globalNotificationService = notificationService;
 

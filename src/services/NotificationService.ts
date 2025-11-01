@@ -3,10 +3,12 @@ import { ConfigService } from './ConfigService.js';
 import { LoggingService } from './LoggingService.js';
 import { AccountStateService } from './AccountStateService.js';
 import { DatabaseService } from './DatabaseService.js';
+import { ExchangeRulesService } from './ExchangeRulesService.js';
 import Decimal from 'decimal.js';
 import type { AccountState } from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
 import type { DecimalValue } from '../interfaces/IValidatorTypes.js';
+import type { IExchangeService } from '../interfaces/IExchangeService.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const DecimalConstructor = Decimal as any;
@@ -20,6 +22,8 @@ export class NotificationService {
   private readonly configService: ConfigService;
   private accountStateService: AccountStateService | null = null;
   private databaseService: DatabaseService | null = null;
+  private exchangeService: IExchangeService | null = null;
+  private exchangeRulesService: ExchangeRulesService | null = null;
   private bot: TelegramBot | null = null;
   private chatId: string | null = null;
   private isEnabled: boolean = false;
@@ -78,6 +82,22 @@ export class NotificationService {
   public injectDatabaseService(databaseService: DatabaseService): void {
     this.databaseService = databaseService;
     this.logger.debug('DatabaseService injected.');
+  }
+
+  /**
+   * Инъекция ExchangeService (для получения текущих цен)
+   */
+  public injectExchangeService(exchangeService: IExchangeService): void {
+    this.exchangeService = exchangeService;
+    this.logger.debug('ExchangeService injected.');
+  }
+
+  /**
+   * Инъекция ExchangeRulesService (для получения комиссий биржи)
+   */
+  public injectExchangeRulesService(exchangeRulesService: ExchangeRulesService): void {
+    this.exchangeRulesService = exchangeRulesService;
+    this.logger.debug('ExchangeRulesService injected.');
   }
 
   /**
@@ -173,11 +193,13 @@ export class NotificationService {
         }
 
         let fullMessage = this._escapeMarkdown(processedMessage);
+        let useHtmlMode = false;
 
         if (includeAccountState && this.accountStateService) {
           const accountState = this.accountStateService.getAccountState();
-          const accountStateText = this._formatAccountState(accountState);
+          const accountStateText = await this._formatAccountState(accountState);
           fullMessage = `${fullMessage}\n\n${accountStateText}`;
+          useHtmlMode = true; // Используем HTML для сообщений с AccountState
         }
 
         // Разбиваем сообщение на части, если оно слишком длинное
@@ -188,9 +210,11 @@ export class NotificationService {
             const part = messageParts[i];
             // Экранируем partNumber отдельно для безопасности
             const partNumber =
-              messageParts.length > 1 ? ` ${this._escapeMarkdown(`(часть ${i + 1}/${messageParts.length})`)}` : '';
+              messageParts.length > 1
+                ? ` ${useHtmlMode ? this._escapeHtml(`(часть ${i + 1}/${messageParts.length})`) : this._escapeMarkdown(`(часть ${i + 1}/${messageParts.length})`)}`
+                : '';
             await this._sendMessageWithRetry(this.chatId, part + partNumber, {
-              parse_mode: 'MarkdownV2',
+              parse_mode: useHtmlMode ? 'HTML' : 'MarkdownV2',
             });
             // Небольшая задержка между частями
             if (i < messageParts.length - 1) {
@@ -345,21 +369,21 @@ export class NotificationService {
   }
 
   /**
-   * Форматирование состояния портфеля для Telegram (MarkdownV2)
+   * Форматирование состояния портфеля для Telegram (HTML для поддержки цветов)
    */
-  private _formatAccountState(state: AccountState): string {
+  private async _formatAccountState(state: AccountState): Promise<string> {
     const lines: string[] = [];
 
     // Заголовок
-    lines.push('*📊 Состояние портфеля:*');
+    lines.push('<b>📊 Состояние портфеля:</b>');
 
     // Общая стоимость
-    const totalValue = this._escapeMarkdown(state.total_portfolio_value_usdt.toString());
-    lines.push(`*Total Value:* \`${totalValue}\` USDT`);
+    const totalValue = this._escapeHtml(state.total_portfolio_value_usdt.toString());
+    lines.push(`<b>Total Value:</b> <code>${totalValue}</code> USDT`);
 
     // Доступный баланс
-    const availableBalance = this._escapeMarkdown(state.available_quote_balance.toString());
-    lines.push(`*Available:* \`${availableBalance}\` USDT`);
+    const availableBalance = this._escapeHtml(state.available_quote_balance.toString());
+    lines.push(`<b>Available:</b> <code>${availableBalance}</code> USDT`);
 
     // Балансы только отслеживаемых валют из watchlist
     const watchlist = this.configService.getWatchlist();
@@ -376,38 +400,132 @@ export class NotificationService {
     const trackedAssets = state.assets.filter((asset) => trackedCurrencies.has(asset.asset));
 
     if (trackedAssets.length > 0) {
-      lines.push(`\n*Валюты на счете \\(отслеживаемые\\):*`);
+      lines.push(`\n<b>Валюты на счете (отслеживаемые):</b>`);
       for (const asset of trackedAssets) {
-        const assetName = this._escapeMarkdown(asset.asset);
-        const total = this._escapeMarkdown(asset.total.toString());
-        const available = this._escapeMarkdown(asset.available.toString());
-        lines.push(`  • ${assetName}: \`${total}\` \\(доступно: \`${available}\`\\)`);
+        const assetName = this._escapeHtml(asset.asset);
+        const total = this._escapeHtml(asset.total.toString());
+        const available = this._escapeHtml(asset.available.toString());
+        lines.push(`  • ${assetName}: <code>${total}</code> (доступно: <code>${available}</code>)`);
       }
     } else {
-      lines.push(`\n*Валюты на счете:* нет отслеживаемых валют`);
+      lines.push(`\n<b>Валюты на счете:</b> нет отслеживаемых валют`);
     }
 
     // Открытые позиции
     if (state.open_positions.length > 0) {
-      lines.push(`\n*Позиции \\(${state.open_positions.length}\\):*`);
-      for (const position of state.open_positions) {
-        const pair = this._escapeMarkdown(position.pair);
-        const side = this._escapeMarkdown(position.side);
-        const amount = this._escapeMarkdown(position.amount.toString());
-        const entryPrice = this._escapeMarkdown(position.average_entry_price.toString());
-        lines.push(`  • ${pair} \\(${side}\\): \`${amount}\` @ \`${entryPrice}\``);
+      lines.push(`\n<b>Позиции (${state.open_positions.length}):</b>`);
+
+      // Получаем данные о комиссиях из БД параллельно
+      const positionsWithFees = await Promise.all(
+        state.open_positions.map(async (position) => {
+          let entryFeeCost = new DecimalConstructor(0);
+          if (this.databaseService) {
+            try {
+              const feeResult = await this.databaseService.query(
+                'SELECT total_fee_cost FROM ActivePositions WHERE pair = $1',
+                [position.pair],
+              );
+              if (feeResult.rows && feeResult.rows.length > 0) {
+                entryFeeCost = new DecimalConstructor(feeResult.rows[0].total_fee_cost || '0');
+              }
+            } catch (error) {
+              this.logger.warn(`Не удалось получить комиссию для позиции ${position.pair}:`, error);
+            }
+          }
+          return { position, entryFeeCost };
+        }),
+      );
+
+      // Получаем текущие цены и рассчитываем PnL для каждой позиции
+      for (const { position, entryFeeCost } of positionsWithFees) {
+        const pair = this._escapeHtml(position.pair);
+        const side = this._escapeHtml(position.side);
+        const amount = this._escapeHtml(position.amount.toString());
+        const entryPrice = this._escapeHtml(position.average_entry_price.toString());
+
+        let pnlText = '';
+
+        if (this.exchangeService && this.exchangeRulesService) {
+          try {
+            // Получаем текущую цену
+            const ticker = await this.exchangeService.fetchTicker(position.pair);
+            const currentPrice = ticker.last;
+
+            // Получаем комиссию биржи
+            const rules = this.exchangeRulesService.getRules(position.pair);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const takerFee = rules.takerFee as any;
+
+            // Рассчитываем комиссию при закрытии
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const amountDecimal = position.amount as any;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const currentPriceDecimal = currentPrice as any;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const entryPriceDecimal = position.average_entry_price as any;
+
+            // Стоимость позиции при закрытии
+            const closeValue = amountDecimal.mul(currentPriceDecimal);
+            // Комиссия при закрытии
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const closeFee = closeValue.mul(takerFee) as any;
+
+            // Пропорциональная часть комиссии при входе
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const entryFeeCostDecimal = entryFeeCost as any;
+
+            // Рассчитываем unrealized PnL
+            let unrealizedPnl: DecimalValue;
+            if (position.side === 'long') {
+              // Для LONG: PnL = (current_price - entry_price) * amount - entry_fee - close_fee
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const priceDiff = currentPriceDecimal.minus(entryPriceDecimal);
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const grossPnl = priceDiff.mul(amountDecimal);
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const totalFees = entryFeeCostDecimal.plus(closeFee);
+              unrealizedPnl = grossPnl.minus(totalFees) as DecimalValue;
+            } else {
+              // Для SHORT: PnL = (entry_price - current_price) * amount - entry_fee - close_fee
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const priceDiff = entryPriceDecimal.minus(currentPriceDecimal);
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const grossPnl = priceDiff.mul(amountDecimal);
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const totalFees = entryFeeCostDecimal.plus(closeFee);
+              unrealizedPnl = grossPnl.minus(totalFees) as DecimalValue;
+            }
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const pnlDecimal = unrealizedPnl as any;
+            const pnlValue = pnlDecimal.toFixed(2);
+
+            // Определяем цвет и форматирование (Telegram HTML не поддерживает inline стили)
+            // Используем эмодзи и жирный текст для визуального различия
+            if (pnlDecimal.gte(0)) {
+              pnlText = ` <b>✅ +${this._escapeHtml(pnlValue)} USDT</b>`;
+            } else {
+              pnlText = ` <b>❌ ${this._escapeHtml(pnlValue)} USDT</b>`;
+            }
+          } catch (error) {
+            this.logger.warn(`Не удалось рассчитать PnL для позиции ${position.pair}:`, error);
+            pnlText = ' (PnL недоступен)';
+          }
+        }
+
+        lines.push(`  • ${pair} (${side}): <code>${amount}</code> @ <code>${entryPrice}</code>${pnlText}`);
       }
     }
 
     // Открытые ордера
     if (state.open_orders.length > 0) {
-      lines.push(`\n*Ордера \\(${state.open_orders.length}\\):*`);
+      lines.push(`\n<b>Ордера (${state.open_orders.length}):</b>`);
       for (const order of state.open_orders) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const orderTyped = order as any;
-        const pair = this._escapeMarkdown(orderTyped.pair || '');
-        const type = this._escapeMarkdown(orderTyped.type || '');
-        lines.push(`  • ${pair}: \`${type}\``);
+        const pair = this._escapeHtml(orderTyped.pair || '');
+        const type = this._escapeHtml(orderTyped.type || '');
+        lines.push(`  • ${pair}: <code>${type}</code>`);
       }
     }
 
@@ -772,5 +890,12 @@ export class NotificationService {
     // Экранируем все спецсимволы: _ * [ ] ( ) ~ ` > # + - = | { } . !
     // eslint-disable-next-line no-useless-escape
     return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+  }
+
+  /**
+   * Экранирование спецсимволов для Telegram HTML
+   */
+  private _escapeHtml(text: string): string {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 }

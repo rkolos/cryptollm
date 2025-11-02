@@ -217,26 +217,13 @@ export class SlowCycleService {
         // Продолжаем выполнение, так как это не критично
       }
 
-      // Шаг 2: Плановая сверка (с таймаутом, чтобы не блокировать проверку триггеров)
+      // Шаг 2: Плановая сверка
       try {
         this.logger.debug('(SlowCycle) Шаг 2: Плановая сверка...');
-        // Таймаут 8 минут (480 секунд) - чтобы сверка не блокировала проверку триггеров
-        const syncPromise = this.syncEngine.reconcileStateAll();
-        const timeoutPromise = new Promise<void>((_, reject) => {
-          setTimeout(() => {
-            reject(new Error('Таймаут плановой сверки (8 минут)'));
-          }, 480000); // 8 минут
-        });
-
-        await Promise.race([syncPromise, timeoutPromise]);
+        await this.syncEngine.reconcileStateAll();
         this.logger.debug('(SlowCycle) Шаг 2: Плановая сверка завершена.');
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (errorMessage.includes('Таймаут')) {
-          this.logger.warn('(SlowCycle) Плановая сверка превысила таймаут (8 минут). Продолжаем выполнение...');
-        } else {
-          this.logger.error('(SlowCycle) Ошибка при плановой сверке:', error);
-        }
+        this.logger.error('(SlowCycle) Ошибка при плановой сверке:', error);
         // Продолжаем выполнение, так как это не критично
       }
 

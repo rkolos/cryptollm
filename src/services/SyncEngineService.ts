@@ -120,8 +120,29 @@ export class SyncEngineService {
 
     // Используем for...of для последовательного выполнения,
     // чтобы распределить нагрузку на API биржи во времени.
+    // Добавляем таймаут для каждой пары, чтобы зависание одной пары не блокировало остальные
     for (const pair of watchlist) {
-      await this.reconcileStateForPair(pair);
+      try {
+        // Таймаут 30 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
+        const reconcilePromise = this.reconcileStateForPair(pair);
+        const timeoutPromise = new Promise<void>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error(`Таймаут сверки для пары ${pair} (30 секунд)`));
+          }, 30000); // 30 секунд на пару
+        });
+
+        await Promise.race([reconcilePromise, timeoutPromise]);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes('Таймаут')) {
+          this.logger.warn(
+            `[${pair}] Сверка для пары превысила таймаут (30 секунд). Возможно, очередь занята другой операцией. Продолжаем со следующей парой...`,
+          );
+        } else {
+          this.logger.error(`[${pair}] Ошибка при сверке пары:`, error);
+        }
+        // Продолжаем выполнение для остальных пар
+      }
     }
 
     this.logger.info('Плановая сверка завершена.');

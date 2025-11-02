@@ -292,6 +292,25 @@ export class WatcherOrchestratorService {
                 ];
                 reasonToSave = `Fallback триггер (модель не установила триггеры): проверка через ${defaultTimeoutMinutes} минут`;
                 isFallbackTrigger = true;
+              } else {
+                // Проверка: если триггеры есть, но нет timeout триггера, добавляем его по умолчанию (60 минут)
+                const hasTimeoutTrigger = triggerConditionsToSave.some((trigger) => trigger.type === 'timeout');
+
+                if (!hasTimeoutTrigger) {
+                  const defaultTimeoutMinutes = 60; // По умолчанию 60 минут
+                  this.logger.info(
+                    `[${pair}] Модель не установила timeout триггер. Добавляю timeout триггер по умолчанию на ${defaultTimeoutMinutes} минут.`,
+                  );
+
+                  triggerConditionsToSave = [
+                    ...triggerConditionsToSave,
+                    {
+                      type: 'timeout' as const,
+                      condition: 'minutes_passed',
+                      value: defaultTimeoutMinutes,
+                    },
+                  ];
+                }
               }
 
               await client.query(

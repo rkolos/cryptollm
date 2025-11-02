@@ -1,4 +1,5 @@
 import Decimal from 'decimal.js';
+import cron from 'node-cron';
 import { LoggingService } from './LoggingService.js';
 import { ConfigService } from './ConfigService.js';
 import { GlobalStateService } from './GlobalStateService.js';
@@ -16,6 +17,7 @@ import { PairActorManagerService } from './PairActorManagerService.js';
 import type { IExchangeService, IDecimalTicker } from '../interfaces/IExchangeService.js';
 import type { LLMTriggerCondition } from '../interfaces/ILLMTypes.js';
 import type { AnalysisResult, DecimalValue } from '../interfaces/ITATypes.js';
+import type { ScheduledTask } from 'node-cron';
 import type winston from 'winston';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -45,7 +47,7 @@ export class SlowCycleService {
   private readonly workerService: IWorkerService;
   private readonly notificationService: INotificationService;
 
-  private intervalId: NodeJS.Timeout | null = null;
+  private cronJob: ScheduledTask | null = null;
 
   private constructor(
     configService: ConfigService,
@@ -111,17 +113,62 @@ export class SlowCycleService {
   }
 
   /**
-   * Запускает медленный цикл с заданным интервалом
+   * Конвертирует интервал в миллисекундах в cron выражение
+   * @param intervalMs Интервал в миллисекундах
+   * @returns Cron выражение (формат: минута час день месяц день_недели)
+   */
+  private _msToCronExpression(intervalMs: number): string {
+    const minutes = Math.floor(intervalMs / 60000);
+
+    if (minutes >= 60) {
+      // Если интервал больше часа, используем часы
+      const hours = Math.floor(minutes / 60);
+      const remainingMinutes = minutes % 60;
+      if (remainingMinutes === 0) {
+        return `0 */${hours} * * *`;
+      }
+      // Для нецелых часов используем минуты
+      return `*/${minutes} * * * *`;
+    }
+
+    if (minutes < 1) {
+      // Если интервал меньше минуты, используем минимальный интервал в 1 минуту
+      this.logger.warn(
+        `(SlowCycle) Интервал ${intervalMs} мс меньше 1 минуты. Используется минимальный интервал 1 минута.`,
+      );
+      return `* * * * *`;
+    }
+
+    // Стандартный случай: каждые N минут
+    return `*/${minutes} * * * *`;
+  }
+
+  /**
+   * Запускает медленный цикл с заданным интервалом (использует node-cron для надежности)
    */
   public start(): void {
     const intervalMs = this.configService.getSlowCycleIntervalMs();
-    this.logger.info(`(SlowCycle) Запуск с интервалом ${intervalMs} мс...`);
+    const cronExpression = this._msToCronExpression(intervalMs);
+    this.logger.info(`(SlowCycle) Запуск с интервалом ${intervalMs} мс (cron: ${cronExpression})...`);
 
-    this.intervalId = setInterval(() => {
-      this.runTick().catch((error) => {
-        this.logger.error('(SlowCycle) Необработанная ошибка в runTick:', error);
-      });
-    }, intervalMs);
+    // Проверяем валидность cron выражения
+    if (!cron.validate(cronExpression)) {
+      this.logger.error(`(SlowCycle) Невалидное cron выражение: ${cronExpression}`);
+      throw new Error(`Invalid cron expression: ${cronExpression}`);
+    }
+
+    // Создаем cron задачу
+    this.cronJob = cron.schedule(
+      cronExpression,
+      () => {
+        this.runTick().catch((error) => {
+          this.logger.error('(SlowCycle) Необработанная ошибка в runTick:', error);
+        });
+      },
+      {
+        timezone: 'UTC',
+      },
+    );
 
     // Немедленно вызываем runTick один раз при старте
     this.runTick().catch((error) => {
@@ -134,9 +181,9 @@ export class SlowCycleService {
    */
   public stop(): void {
     this.logger.warn('(SlowCycle) Остановка...');
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.cronJob) {
+      this.cronJob.stop();
+      this.cronJob = null;
     }
   }
 

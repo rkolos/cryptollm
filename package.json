@@ -28,6 +28,8 @@
     "test:testnet": "tsx ./scripts/test-binance-testnet.ts",
     "create-triggers": "tsx ./scripts/create-initial-triggers.ts",
     "fill-triggers": "tsx ./scripts/fill-missing-triggers.ts",
+    "add-timeout-triggers": "tsx ./scripts/add-missing-timeout-triggers.ts",
+    "check-triggers": "tsx ./scripts/check-triggers.ts",
     "clear-db": "tsx ./scripts/clear-database.ts",
     "mcp:postgres": "tsx ./scripts/start-mcp-postgres.ts",
     "mcp:postgres:server": "tsx ./scripts/mcp-postgres-server.ts"
@@ -54,12 +56,14 @@
     "vitest": "^4.0.5"
   },
   "dependencies": {
+    "@types/node-cron": "^3.0.11",
     "@types/node-telegram-bot-api": "^0.64.12",
     "axios": "^1.13.1",
     "ccxt": "^4.5.14",
     "decimal.js": "^10.6.0",
     "dotenv": "^17.2.3",
     "eventemitter3": "^5.0.1",
+    "node-cron": "^4.2.1",
     "node-telegram-bot-api": "^0.66.0",
     "pg": "^8.16.3",
     "technicalindicators": "^3.1.0",

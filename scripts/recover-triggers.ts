@@ -82,7 +82,7 @@ async function recoverTriggers() {
       databaseService,
       eventBus,
     );
-    const notificationService = NotificationService.getInstance(accountStateService, configService);
+    const notificationService = NotificationService.getInstance(configService);
     const taEngineService = TAEngineService.getInstance(databaseService);
     const marketDataService = MarketDataService.getInstance(exchangeService);
     const watchlistOverviewService = WatchlistOverviewService.getInstance(marketDataService);

@@ -31,6 +31,7 @@
     "add-timeout-triggers": "tsx ./scripts/add-missing-timeout-triggers.ts",
     "add-volatile-pairs": "tsx ./scripts/add-volatile-pairs.ts",
     "check-triggers": "tsx ./scripts/check-triggers.ts",
+    "check-available-pairs": "tsx ./scripts/check-available-pairs.ts",
     "recover-triggers": "tsx ./scripts/recover-triggers.ts",
     "force-trigger-all": "tsx ./scripts/force-trigger-all.ts",
     "clear-db": "tsx ./scripts/clear-database.ts",

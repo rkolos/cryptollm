@@ -23,7 +23,7 @@ async function addMissingTimeoutTriggers() {
 
     // Получаем все существующие триггеры
     const existingTriggersResult = await pool.query(
-      'SELECT pair, trigger_conditions_json FROM LLM_Triggers ORDER BY pair',
+      'SELECT pair, trigger_conditions_json FROM llm_triggers ORDER BY pair',
     );
     const allTriggers = existingTriggersResult.rows;
 
@@ -71,7 +71,7 @@ async function addMissingTimeoutTriggers() {
 
         try {
           await pool.query(
-            `UPDATE LLM_Triggers 
+            `UPDATE llm_triggers 
              SET trigger_conditions_json = $1, 
                  updated_at = $2
              WHERE pair = $3`,

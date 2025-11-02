@@ -327,7 +327,7 @@ export class WatcherOrchestratorService {
               }
 
               await client.query(
-                `INSERT INTO LLM_Triggers (pair, reason, trigger_conditions_json, requested_data_json, updated_at)
+                `INSERT INTO llm_triggers (pair, reason, trigger_conditions_json, requested_data_json, updated_at)
                VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (pair) DO UPDATE SET
                  reason = EXCLUDED.reason,
@@ -493,7 +493,7 @@ export class WatcherOrchestratorService {
                         `[${pair}] Решение на открытие позиции отклонено валидатором. Удаление триггеров для пары ${pairToClean}...`,
                       );
 
-                      await this.databaseService.query('DELETE FROM LLM_Triggers WHERE pair = $1', [pairToClean]);
+                      await this.databaseService.query('DELETE FROM llm_triggers WHERE pair = $1', [pairToClean]);
 
                       this.logger.info(
                         `[${pair}] Триггеры удалены для пары ${pairToClean} из-за отклонения решения на открытие позиции валидатором.`,

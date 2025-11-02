@@ -312,7 +312,7 @@ export class LLMRequestAssemblerService {
 
     // Шаг A: Получение "on-demand" данных из БД
     const triggerResult = await this.databaseService.query(
-      'SELECT requested_data_json FROM LLM_Triggers WHERE pair = $1',
+      'SELECT requested_data_json FROM llm_triggers WHERE pair = $1',
       [triggeredPair],
     );
 

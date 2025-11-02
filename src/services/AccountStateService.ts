@@ -142,7 +142,7 @@ export class AccountStateService {
           this.databaseService.query('SELECT * FROM ActivePositions'),
           this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
           this.databaseService.query('SELECT * FROM TSL_State'),
-          this.databaseService.query('SELECT * FROM LLM_Triggers'),
+          this.databaseService.query('SELECT * FROM llm_triggers'),
         ]);
 
         // Парсинг баланса

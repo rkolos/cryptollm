@@ -170,10 +170,17 @@ export class SlowCycleService {
       },
     );
 
-    // Немедленно вызываем runTick один раз при старте
-    this.runTick().catch((error) => {
-      this.logger.error('(SlowCycle) Ошибка при первоначальном запуске runTick:', error);
-    });
+    // Сначала проверяем просроченные триггеры немедленно при старте
+    this.checkOverdueTriggersOnStartup()
+      .catch((error) => {
+        this.logger.error('(SlowCycle) Ошибка при проверке просроченных триггеров при старте:', error);
+      })
+      .finally(() => {
+        // Затем запускаем обычный цикл
+        this.runTick().catch((error) => {
+          this.logger.error('(SlowCycle) Ошибка при первоначальном запуске runTick:', error);
+        });
+      });
   }
 
   /**
@@ -250,14 +257,128 @@ export class SlowCycleService {
   }
 
   /**
+   * Проверка просроченных триггеров при старте приложения
+   * Обрабатывает триггеры, которые уже просрочены (например, если приложение было остановлено)
+   */
+  private async checkOverdueTriggersOnStartup(): Promise<void> {
+    try {
+      this.logger.info('(SlowCycle) Проверка просроченных триггеров при старте приложения...');
+      const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
+      const allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
+
+      this.logger.info(`(SlowCycle) Найдено ${allTriggers.length} триггеров для проверки на просроченность при старте`);
+
+      if (allTriggers.length === 0) {
+        this.logger.debug('(SlowCycle) Нет триггеров для проверки.');
+        return;
+      }
+
+      let overdueCount = 0;
+
+      for (const row of allTriggers) {
+        try {
+          const pair = row.pair;
+          if (!pair) {
+            continue;
+          }
+
+          const triggerConditionsJson = row.trigger_conditions_json;
+          if (!triggerConditionsJson) {
+            continue;
+          }
+
+          let conditions: LLMTriggerCondition[];
+          try {
+            // PostgreSQL возвращает JSONB как объект, а не строку
+            if (typeof triggerConditionsJson === 'string') {
+              if (triggerConditionsJson === '[object Object]') {
+                continue;
+              }
+              conditions = JSON.parse(triggerConditionsJson) as LLMTriggerCondition[];
+            } else if (Array.isArray(triggerConditionsJson)) {
+              conditions = triggerConditionsJson as LLMTriggerCondition[];
+            } else if (triggerConditionsJson && typeof triggerConditionsJson === 'object') {
+              try {
+                const jsonString = JSON.stringify(triggerConditionsJson);
+                conditions = JSON.parse(jsonString) as LLMTriggerCondition[];
+              } catch {
+                continue;
+              }
+            } else {
+              continue;
+            }
+          } catch {
+            continue;
+          }
+
+          if (!Array.isArray(conditions)) {
+            continue;
+          }
+
+          // Проверяем только timeout триггеры на просроченность
+          for (const condition of conditions) {
+            if (condition.type === 'timeout') {
+              if (condition.condition === 'minutes_passed') {
+                const updatedAt = new Date(row.updated_at).getTime();
+                const now = Date.now();
+                const minutesPassed = Math.floor((now - updatedAt) / 60000);
+                const requiredMinutes = condition.value;
+
+                if (minutesPassed >= requiredMinutes) {
+                  overdueCount++;
+                  this.logger.info(
+                    `(SlowCycle) [${pair}] Найден просроченный timeout триггер при старте: прошло ${minutesPassed} минут, требуется ${requiredMinutes} минут. Немедленная обработка...`,
+                  );
+                  // Запускаем оркестрацию для просроченного триггера
+                  this.orchestrator.executeOrchestration(
+                    pair,
+                    `Startup Overdue Trigger: timeout (просрочен на ${minutesPassed - requiredMinutes} минут)`,
+                  );
+                  break; // Прерываем цикл по условиям для этой пары
+                }
+              } else {
+                // Старый формат: значение - это timestamp в миллисекундах
+                const now = Date.now();
+                const triggerTime = condition.value;
+                if (now >= triggerTime) {
+                  overdueCount++;
+                  this.logger.info(
+                    `(SlowCycle) [${pair}] Найден просроченный timeout триггер (legacy) при старте. Немедленная обработка...`,
+                  );
+                  this.orchestrator.executeOrchestration(pair, `Startup Overdue Trigger: timeout (legacy, просрочен)`);
+                  break;
+                }
+              }
+            }
+          }
+        } catch (error) {
+          this.logger.error(`(SlowCycle) [${row.pair}] Ошибка при проверке просроченного триггера при старте:`, error);
+        }
+      }
+
+      if (overdueCount > 0) {
+        this.logger.info(
+          `(SlowCycle) Проверка просроченных триггеров завершена. Найдено и обработано ${overdueCount} просроченных триггеров.`,
+        );
+      } else {
+        this.logger.info('(SlowCycle) Просроченных триггеров не найдено.');
+      }
+    } catch (error) {
+      this.logger.error('(SlowCycle) Ошибка при проверке просроченных триггеров при старте:', error);
+      // Не пробрасываем ошибку, чтобы не блокировать запуск приложения
+    }
+  }
+
+  /**
    * Проверка timeout и indicator триггеров
    */
   private async _checkTriggers(): Promise<void> {
     try {
-      const allTriggersResult = await this.databaseService.query('SELECT * FROM LLM_Triggers');
+      this.logger.info('(SlowCycle) Начало проверки триггеров...');
+      const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
       const allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
 
-      this.logger.debug(`(SlowCycle) Проверка триггеров: найдено ${allTriggers.length} записей в LLM_Triggers`);
+      this.logger.info(`(SlowCycle) Проверка триггеров: найдено ${allTriggers.length} записей в llm_triggers`);
 
       if (allTriggers.length === 0) {
         this.logger.warn(

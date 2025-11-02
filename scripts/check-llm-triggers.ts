@@ -15,7 +15,7 @@ async function checkLLMTriggers() {
   try {
     console.log('\n=== Проверка триггеров LLM в БД ===\n');
 
-    const result = await pool.query('SELECT * FROM LLM_Triggers ORDER BY pair');
+    const result = await pool.query('SELECT * FROM llm_triggers ORDER BY pair');
 
     if (result.rows.length === 0) {
       console.log('❌ В таблице LLM_Triggers нет записей!\n');

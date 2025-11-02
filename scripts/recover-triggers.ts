@@ -62,7 +62,6 @@ async function recoverTriggers() {
     }
     
     // Загружаем правила только для нужных пар
-    const logger = LoggingService.getInstance().getLogger('RecoverTriggers');
     logger.info('Загрузка правил биржи для восстанавливаемых пар...');
     ExchangeRulesService.instance = ExchangeRulesService.instance || new ExchangeRulesService();
     

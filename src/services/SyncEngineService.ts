@@ -559,10 +559,10 @@ export class SyncEngineService {
         if (dbOrder.target_stop_loss_price) {
           try {
             const slPrice = new DecimalConstructor(dbOrder.target_stop_loss_price);
-            // Используем STOP_LOSS_LIMIT для защиты от проскальзывания
+            // Используем stop_loss_limit для защиты от проскальзывания
             const slOrder = await this.guaranteedOrderService.createOrderWithRetry(
               pair,
-              'STOP_LOSS_LIMIT',
+              'stop_loss_limit',
               oppositeSide,
               realAmount as DecimalValue,
               slPrice as DecimalValue,

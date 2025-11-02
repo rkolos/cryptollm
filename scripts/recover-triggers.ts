@@ -183,11 +183,13 @@ async function recoverTriggers() {
     }
 
     logger.info(`\n✅ Восстановление инициировано для ${targetPairs.length} пар.`);
-    logger.info('Обработка будет выполнена асинхронно через PairActorManager.');
-    logger.info('Для просмотра результатов проверьте логи приложения.\n');
+    logger.info('Ожидание завершения обработки всех задач...\n');
 
-    // Ждем немного, чтобы задачи начали выполняться
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    // Ждем завершения всех задач через PairActorManager
+    // Таймаут 120 секунд (2 минуты) - достаточно для запросов к LLM
+    await pairActorManager.waitForAllQueuesToSettle(120000);
+
+    logger.info('\n✅ Все задачи восстановления завершены.');
 
     // Закрываем соединения
     await databaseService.closePool();

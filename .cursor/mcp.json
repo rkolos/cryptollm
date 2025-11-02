@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "npm",
+      "args": ["run", "mcp:postgres:server"]
+    }
+  }
+}

@@ -22,3 +22,48 @@
 - НЕ используйте прямые подключения к БД через `psql` или другие клиенты в командах терминала, если это не требуется для системных задач
 - MCP предоставляет безопасный и контролируемый доступ к базе данных
 
+## Информация о сервере развертывания
+
+- **Сервер**: 104.248.128.150 (Ubuntu 25.04)
+- **Подключение**: `ssh root@104.248.128.150`
+- **Директория проекта**: `/home/cryptollm`
+- **Процесс-менеджер**: PM2 (приложение `cryptollm-dev`)
+- **Режим**: Development (dev) - используется `npm run dev`
+- **База данных**: PostgreSQL в Docker контейнере `cryptollm-postgres`
+- **Сеть Docker**: `cryptollm-network`
+
+### Основные команды для работы с сервером
+
+**Подключение:**
+```bash
+ssh root@104.248.128.150
+```
+
+**Быстрое обновление проекта:**
+```bash
+ssh root@104.248.128.150 "cd /home/cryptollm && git pull && pm2 restart cryptollm-dev"
+```
+
+**Просмотр логов:**
+```bash
+ssh root@104.248.128.150 "pm2 logs cryptollm-dev --lines 50"
+```
+
+**Управление приложением:**
+```bash
+ssh root@104.248.128.150 "pm2 restart cryptollm-dev"  # Перезапуск
+ssh root@104.248.128.150 "pm2 stop cryptollm-dev"      # Остановка
+ssh root@104.248.128.150 "pm2 status"                  # Статус
+```
+
+**Управление базой данных:**
+```bash
+ssh root@104.248.128.150 "cd /home/cryptollm && docker compose up -d postgres"  # Запуск
+ssh root@104.248.128.150 "cd /home/cryptollm && docker compose down"            # Остановка
+```
+
+**Выполнение миграций:**
+```bash
+ssh root@104.248.128.150 "cd /home/cryptollm && npm run migrate:up"
+```
+

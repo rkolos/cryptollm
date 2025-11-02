@@ -58,13 +58,7 @@ async function addVolatilePairs() {
            trigger_conditions_json = EXCLUDED.trigger_conditions_json,
            requested_data_json = EXCLUDED.requested_data_json,
            updated_at = EXCLUDED.updated_at`,
-        [
-          pair,
-          'Added volatile pair - initial LLM call',
-          JSON.stringify(triggerConditions),
-          null,
-          new Date(),
-        ],
+        [pair, 'Added volatile pair - initial LLM call', JSON.stringify(triggerConditions), null, new Date()],
       );
 
       console.log(`✅ Добавлена пара ${pair} (timeout: ${new Date(initialTimeout).toISOString()})`);
@@ -83,4 +77,3 @@ addVolatilePairs().catch((error) => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
-

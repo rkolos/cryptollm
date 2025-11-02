@@ -1,5 +1,6 @@
 import * as ccxt from 'ccxt';
 import Decimal from 'decimal.js';
+import WebSocket from 'ws';
 import { ConfigService } from './ConfigService.js';
 import { LoggingService } from './LoggingService.js';
 import { GlobalStateService } from './GlobalStateService.js';
@@ -27,6 +28,9 @@ export class ProductionExchangeService implements IExchangeService {
   private readonly logger: winston.Logger;
   private timeSyncDone: boolean = false;
   private readonly appMode: string;
+  private wsConnection: WebSocket | null = null;
+  private wsReconnectAttempts: number = 0;
+  private readonly maxReconnectAttempts: number = 10;
 
   constructor() {
     const config = ConfigService.getInstance();
@@ -386,65 +390,248 @@ export class ProductionExchangeService implements IExchangeService {
     });
   }
 
-  public async watchTickers(symbols: string[], callback: (ticker: IDecimalTicker) => Promise<void>): Promise<void> {
-    // Binance не поддерживает watchTickers в CCXT, используем polling вместо WebSocket
-    // Это безопасная альтернатива, которая работает надежно для всех бирж
-    const pollIntervalMs = 1000; // Обновляем тикеры каждую секунду
-    let isRunning = true;
+  /**
+   * Строит WebSocket URL для Binance ticker streams
+   */
+  private _buildWebSocketUrl(symbols: string[]): string {
+    // Преобразуем символы в формат для Binance streams (например, BTCUSDT -> btcusdt@ticker)
+    const streams = symbols.map((symbol) => `${symbol.toLowerCase()}@ticker`).join('/');
 
-    this.logger.info(`Starting ticker polling for ${symbols.length} pairs (interval: ${pollIntervalMs}ms)`);
+    if (this.appMode === 'testnet') {
+      return `wss://testnet.binance.vision/stream?streams=${streams}`;
+    }
+    return `wss://stream.binance.com:9443/stream?streams=${streams}`;
+  }
 
-    while (isRunning && !GlobalStateService.getInstance().getIsShuttingDown()) {
-      try {
-        // Получаем тикеры для всех символов параллельно
-        const tickerPromises = symbols.map((symbol) =>
-          this.fetchTicker(symbol).catch((error) => {
-            this.logger.warn(
-              `Failed to fetch ticker for ${symbol}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            return null;
-          }),
-        );
+  /**
+   * Парсит данные из Binance WebSocket ticker stream в формат IDecimalTicker
+   */
+  private _parseBinanceTicker(data: unknown): IDecimalTicker | null {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const message = data as any;
 
-        const tickers = await Promise.all(tickerPromises);
-
-        // Вызываем callback для каждого успешно полученного тикера
-        for (const ticker of tickers) {
-          if (!isRunning || GlobalStateService.getInstance().getIsShuttingDown()) {
-            break;
-          }
-
-          if (ticker) {
-            try {
-              await callback(ticker);
-            } catch (callbackError) {
-              this.logger.error(
-                `Error in ticker callback for ${ticker.symbol}: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}`,
-              );
-            }
-          }
+      // Проверяем формат сообщения (может быть объект с полем data или сам объект данных)
+      let tickerData: unknown;
+      if (message && typeof message === 'object') {
+        // Формат: { stream: "btcusdt@ticker", data: {...} }
+        if ('data' in message && message.data) {
+          tickerData = message.data;
+        } else if ('e' in message && message.e === '24hrTicker') {
+          // Прямой формат данных
+          tickerData = message;
+        } else {
+          this.logger.warn('Unknown WebSocket message format:', JSON.stringify(message).substring(0, 200));
+          return null;
         }
-
-        // Ждем перед следующим обновлением
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-      } catch (error) {
-        this.logger.error(
-          `Error in watchTickers polling loop: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        // При ошибке ждем немного дольше перед повтором
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs * 2));
+      } else {
+        return null;
       }
 
-      // Проверяем флаг остановки
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ticker = tickerData as any;
+
+      // Проверяем обязательные поля
+      if (!ticker.s || !ticker.c) {
+        this.logger.warn('Invalid ticker data: missing required fields');
+        return null;
+      }
+
+      return {
+        symbol: ticker.s, // symbol
+        last: this.toDecimal(ticker.c), // close/last price
+        bid: this.toDecimal(ticker.b || ticker.c), // best bid price (fallback to last)
+        ask: this.toDecimal(ticker.a || ticker.c), // best ask price (fallback to last)
+        baseVolume: this.toDecimal(ticker.v || '0'), // base volume
+        quoteVolume: this.toDecimal(ticker.q || '0'), // quote volume
+        timestamp: ticker.E || Date.now(), // event time
+      };
+    } catch (error) {
+      this.logger.error(`Error parsing Binance ticker data: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  public async watchTickers(symbols: string[], callback: (ticker: IDecimalTicker) => Promise<void>): Promise<void> {
+    if (symbols.length === 0) {
+      this.logger.warn('watchTickers called with empty symbols array');
+      return;
+    }
+
+    const wsUrl = this._buildWebSocketUrl(symbols);
+    this.logger.info(`Connecting to Binance WebSocket for ${symbols.length} pairs: ${wsUrl}`);
+
+    const reconnectDelay = (attempt: number): number => {
+      // Экспоненциальная задержка: 1s, 2s, 4s, 8s, 16s, max 30s
+      return Math.min(1000 * Math.pow(2, attempt), 30000);
+    };
+
+    // Основной цикл подключения и переподключения
+    while (!GlobalStateService.getInstance().getIsShuttingDown()) {
+      // Проверяем состояние перед подключением
       if (GlobalStateService.getInstance().getIsShuttingDown()) {
-        isRunning = false;
+        break;
+      }
+
+      try {
+        // Проверяем, не превышен ли лимит попыток переподключения
+        if (this.wsReconnectAttempts >= this.maxReconnectAttempts) {
+          this.logger.error(`Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping watchTickers.`);
+          break;
+        }
+
+        // Создаем новое WebSocket соединение
+        const ws = await new Promise<WebSocket>((resolve, reject) => {
+          try {
+            const websocket = new WebSocket(wsUrl);
+            let resolved = false;
+
+            // Обработка таймаута подключения
+            const connectionTimeout = setTimeout(() => {
+              if (!resolved && websocket.readyState !== WebSocket.OPEN) {
+                websocket.close();
+                reject(new Error('WebSocket connection timeout'));
+              }
+            }, 10000); // 10 секунд таймаут
+
+            websocket.on('open', () => {
+              if (!resolved) {
+                resolved = true;
+                clearTimeout(connectionTimeout);
+                this.logger.info(`WebSocket connected for ${symbols.length} ticker streams`);
+                this.wsReconnectAttempts = 0; // Сбрасываем счетчик при успешном подключении
+                this.wsConnection = websocket;
+                resolve(websocket);
+              }
+            });
+
+            websocket.on('error', (error: Error) => {
+              if (!resolved) {
+                this.logger.error(`WebSocket connection error: ${error.message}`);
+                // Не reject здесь, ждем события close или таймаута
+              }
+            });
+
+            websocket.on(
+              'unexpected-response',
+              (request: unknown, response: { statusCode: number; statusMessage: string }) => {
+                if (!resolved) {
+                  resolved = true;
+                  clearTimeout(connectionTimeout);
+                  this.logger.error(`WebSocket unexpected response: ${response.statusCode} ${response.statusMessage}`);
+                  reject(new Error(`Unexpected response: ${response.statusCode} ${response.statusMessage}`));
+                }
+              },
+            );
+          } catch (error) {
+            reject(error);
+          }
+        });
+
+        // Настраиваем обработчики сообщений
+        ws.on('message', async (data: WebSocket.Data) => {
+          try {
+            const message = JSON.parse(data.toString());
+            const ticker = this._parseBinanceTicker(message);
+
+            if (ticker) {
+              // Вызываем callback асинхронно, но не блокируем обработку сообщений
+              callback(ticker).catch((callbackError) => {
+                this.logger.error(
+                  `Error in ticker callback for ${ticker.symbol}: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}`,
+                );
+              });
+            }
+          } catch (parseError) {
+            this.logger.error(
+              `Error parsing WebSocket message: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+            );
+          }
+        });
+
+        // Ждем закрытия соединения
+        await new Promise<void>((resolve) => {
+          ws.on('close', (code: number, reason: Buffer) => {
+            this.wsConnection = null;
+            const reasonStr = reason.toString();
+
+            // Если это штатное закрытие или shutdown, завершаем
+            if (GlobalStateService.getInstance().getIsShuttingDown() || code === 1000) {
+              this.logger.info(`WebSocket closed normally (code: ${code}, reason: ${reasonStr})`);
+              resolve();
+              return;
+            }
+
+            // Неожиданное закрытие - логируем и разрешаем Promise для переподключения
+            this.logger.warn(
+              `WebSocket closed unexpectedly (code: ${code}, reason: ${reasonStr}). Will reconnect in next iteration.`,
+            );
+            resolve(); // Разрешаем Promise, чтобы цикл while мог переподключиться
+          });
+
+          ws.on('error', (error: Error) => {
+            this.logger.error(`WebSocket error during operation: ${error.message}`);
+            // Ошибка не закрывает соединение автоматически, ждем события close
+          });
+        });
+
+        // Если дошли сюда и это не shutdown, значит соединение закрылось неожиданно
+        // Цикл while продолжит и попытается переподключиться
+        if (GlobalStateService.getInstance().getIsShuttingDown()) {
+          break;
+        }
+
+        // Увеличиваем счетчик попыток перед переподключением
+        this.wsReconnectAttempts++;
+        const delay = reconnectDelay(this.wsReconnectAttempts - 1); // -1 потому что счетчик уже увеличен
+
+        if (this.wsReconnectAttempts < this.maxReconnectAttempts) {
+          this.logger.info(
+            `Reconnecting in ${delay}ms (attempt ${this.wsReconnectAttempts}/${this.maxReconnectAttempts})...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        } else {
+          this.logger.error(`Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping watchTickers.`);
+          break;
+        }
+      } catch (error) {
+        if (GlobalStateService.getInstance().getIsShuttingDown()) {
+          break;
+        }
+
+        this.logger.error(
+          `WebSocket connection failed: ${error instanceof Error ? error.message : String(error)}. Retrying...`,
+        );
+
+        // Увеличиваем счетчик попыток перед повтором
+        const delay = reconnectDelay(this.wsReconnectAttempts);
+        this.wsReconnectAttempts++;
+
+        if (this.wsReconnectAttempts < this.maxReconnectAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        } else {
+          this.logger.error(`Max reconnection attempts reached. Stopping watchTickers.`);
+          break;
+        }
       }
     }
 
-    this.logger.info('Ticker polling stopped');
+    this.logger.info('watchTickers stopped');
   }
 
   public async close(): Promise<void> {
+    // Закрываем WebSocket соединение, если оно открыто
+    if (this.wsConnection) {
+      try {
+        this.wsConnection.close(1000, 'Normal closure');
+        this.wsConnection = null;
+        this.logger.info('WebSocket connection closed.');
+      } catch (error) {
+        this.logger.error(`Error closing WebSocket: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // Закрываем CCXT соединения
     await this.ccxtExchange.close();
     this.logger.info('Exchange connections closed.');
   }

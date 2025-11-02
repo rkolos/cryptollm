@@ -8,6 +8,9 @@ export class DatabaseService {
   private readonly pool: Pool;
   private readonly logger: winston.Logger;
   private isPoolClosed: boolean = false;
+  private activeOperationsCount: number = 0;
+  private closePoolPromise: Promise<void> | null = null;
+  private closePoolResolve: (() => void) | null = null;
 
   private constructor(pool: Pool) {
     this.pool = pool;
@@ -55,10 +58,16 @@ export class DatabaseService {
   }
 
   public async query(text: string, params: unknown[] = []): Promise<QueryResult> {
+    // ???? ?????????? ???????? ???????? ????, ???? ?? ???????
+    if (this.closePoolPromise) {
+      await this.closePoolPromise;
+    }
+
     if (this.isPoolClosed) {
       throw new Error('Cannot execute query: database pool is closed');
     }
 
+    this.activeOperationsCount++;
     const startTime = Date.now();
 
     try {
@@ -77,14 +86,26 @@ export class DatabaseService {
       }
       this.logger.error(`Query failed after ${duration}ms:`, error);
       throw error;
+    } finally {
+      this.activeOperationsCount--;
+      if (this.closePoolResolve && this.activeOperationsCount === 0) {
+        this.closePoolResolve();
+        this.closePoolResolve = null;
+      }
     }
   }
 
   public async executeInTransaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
+    // ???? ?????????? ???????? ???????? ????, ???? ?? ???????
+    if (this.closePoolPromise) {
+      await this.closePoolPromise;
+    }
+
     if (this.isPoolClosed) {
       throw new Error('Cannot execute transaction: database pool is closed');
     }
 
+    this.activeOperationsCount++;
     let client: PoolClient | null = null;
 
     try {
@@ -136,6 +157,11 @@ export class DatabaseService {
           }
         }
       }
+      this.activeOperationsCount--;
+      if (this.closePoolResolve && this.activeOperationsCount === 0) {
+        this.closePoolResolve();
+        this.closePoolResolve = null;
+      }
     }
   }
 
@@ -146,13 +172,43 @@ export class DatabaseService {
     }
 
     this.logger.info('Closing database connection pool...');
+    
+    // ????????????? ???? ????????, ????? ????? ???????? ?? ???????? ???????????
     this.isPoolClosed = true;
+
+    // ???? ?????????? ???? ???????? ????????
+    if (this.activeOperationsCount > 0) {
+      this.logger.info(`Waiting for ${this.activeOperationsCount} active operations to complete...`);
+      
+      // ??????? Promise, ??????? ?????????? ????? ??? ???????? ??????????
+      this.closePoolPromise = new Promise<void>((resolve) => {
+        this.closePoolResolve = resolve;
+      });
+
+      // ???? ??????? ??? ???? ?? 0, ????????? ?????
+      // ???? ?????????? ???? ???????? (? ????????? ?? ?????? ???????)
+      await Promise.race([
+          this.closePoolPromise,
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              this.logger.warn(
+                `Timeout waiting for operations to complete. Active operations: ${this.activeOperationsCount}. Proceeding with pool closure.`,
+              );
+              resolve();
+            }, 30000); // 30 ?????? ???????
+          }),
+        ]);
+    }
+
     try {
       await this.pool.end();
       this.logger.info('Database connection pool closed.');
     } catch (error) {
       this.logger.error('Error closing database pool:', error);
       throw error;
+    } finally {
+      this.closePoolPromise = null;
+      this.closePoolResolve = null;
     }
   }
 }

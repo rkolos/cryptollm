@@ -51,7 +51,30 @@ async function recoverTriggers() {
     // Инициализация Exchange и LLM сервисов
     const exchangeService = new ProductionExchangeService();
     const llmService = new ProductionLLMService();
-    await ExchangeRulesService.initialize(exchangeService, configService);
+    
+    // Определяем пары для восстановления (если не указаны, используем все из БД)
+    let targetPairs: string[] = [];
+    if (pairsToRecover.length > 0) {
+      targetPairs = pairsToRecover;
+    } else {
+      const triggersResult = await databaseService.query('SELECT pair FROM LLM_Triggers ORDER BY pair');
+      targetPairs = triggersResult.rows.map((row: { pair: string }) => row.pair);
+    }
+    
+    // Загружаем правила только для нужных пар
+    const logger = LoggingService.getInstance().getLogger('RecoverTriggers');
+    logger.info('Загрузка правил биржи для восстанавливаемых пар...');
+    ExchangeRulesService.instance = ExchangeRulesService.instance || new ExchangeRulesService();
+    
+    for (const pair of targetPairs) {
+      const rules = await ExchangeRulesService.loadRulesForPair(pair, exchangeService);
+      if (rules) {
+        ExchangeRulesService.instance.rulesCache.set(pair, rules);
+        logger.debug(`Правила загружены для ${pair}: minNotional=${rules.minNotional}, takerFee=${rules.takerFee}`);
+      } else {
+        logger.warn(`Пара ${pair} не найдена на бирже или не удалось загрузить правила`);
+      }
+    }
 
     // Инициализация остальных сервисов
     const accountStateService = AccountStateService.getInstance(
@@ -107,17 +130,7 @@ async function recoverTriggers() {
     logger.info('Обновление состояния счета...');
     await accountStateService.refreshNow();
 
-    // Определяем пары для восстановления
-    let targetPairs: string[] = [];
-    if (pairsToRecover.length > 0) {
-      targetPairs = pairsToRecover;
-      logger.info(`Восстановление обработки для указанных пар: ${targetPairs.join(', ')}`);
-    } else {
-      // Получаем все пары с триггерами из БД
-      const triggersResult = await databaseService.query('SELECT pair FROM LLM_Triggers ORDER BY pair');
-      targetPairs = triggersResult.rows.map((row: { pair: string }) => row.pair);
-      logger.info(`Восстановление обработки для всех пар с триггерами: ${targetPairs.join(', ')}`);
-    }
+    logger.info(`Восстановление обработки для пар: ${targetPairs.join(', ')}`);
 
     if (targetPairs.length === 0) {
       logger.warn('Не найдено пар для восстановления.');

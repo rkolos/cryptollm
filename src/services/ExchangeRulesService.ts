@@ -103,4 +103,28 @@ export class ExchangeRulesService {
     }
     return rules;
   }
+
+  /**
+   * Загружает правила для конкретной пары (для использования в скриптах восстановления)
+   */
+  public static async loadRulesForPair(
+    pair: string,
+    exchangeService: IExchangeService,
+  ): Promise<IMarketRules | null> {
+    await exchangeService.loadMarkets();
+    const rawMarkets = exchangeService.getRawMarkets();
+    const market = rawMarkets[pair] as Record<string, unknown> | undefined;
+
+    if (!market) {
+      return null;
+    }
+
+    try {
+      return ExchangeRulesService.parseMarketRules(market);
+    } catch (error) {
+      const logger = LoggingService.getInstance().getLogger('ExchangeRules');
+      logger.error(`Failed to parse rules for ${pair}:`, error);
+      return null;
+    }
+  }
 }

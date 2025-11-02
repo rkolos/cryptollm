@@ -239,7 +239,12 @@ export class WatcherOrchestratorService {
               false,
             );
           } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
             this.logger.error(`[${pair}] Ошибка при вызове LLM:`, error);
+            this.notificationService.sendAlert(
+              `❌ [${pair}] ОШИБКА ПРИ ВЫЗОВЕ LLM: ${errorMessage}\nТриггер сработал, но обработка не завершена.`,
+              false,
+            );
             return; // Выход из актора при ошибке LLM
           }
 

@@ -31,6 +31,7 @@
     "add-timeout-triggers": "tsx ./scripts/add-missing-timeout-triggers.ts",
     "add-volatile-pairs": "tsx ./scripts/add-volatile-pairs.ts",
     "check-triggers": "tsx ./scripts/check-triggers.ts",
+    "recover-triggers": "tsx ./scripts/recover-triggers.ts",
     "clear-db": "tsx ./scripts/clear-database.ts",
     "mcp:postgres": "tsx ./scripts/start-mcp-postgres.ts",
     "mcp:postgres:server": "tsx ./scripts/mcp-postgres-server.ts"
@@ -42,6 +43,7 @@
     "@modelcontextprotocol/server-postgres": "^0.6.2",
     "@types/node": "^20.19.24",
     "@types/pg": "^8.11.0",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "@vitest/coverage-v8": "^4.0.5",
@@ -69,6 +71,7 @@
     "pg": "^8.16.3",
     "technicalindicators": "^3.1.0",
     "winston": "^3.18.3",
+    "ws": "^8.18.0",
     "zod": "^4.1.12"
   }
 }

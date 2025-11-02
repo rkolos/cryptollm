@@ -88,13 +88,13 @@ async function recoverTriggers() {
     const watchlistOverviewService = WatchlistOverviewService.getInstance(marketDataService);
     const macroContextService = MacroContextService.getInstance();
     const assemblerService = LLMRequestAssemblerService.getInstance(
-      databaseService,
-      accountStateService,
-      taEngineService,
-      marketDataService,
-      watchlistOverviewService,
-      macroContextService,
       configService,
+      databaseService,
+      marketDataService,
+      taEngineService,
+      watchlistOverviewService,
+      accountStateService,
+      macroContextService,
     );
     
     // Инициализация LLMRequestAssemblerService (загрузка промптов)

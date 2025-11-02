@@ -394,8 +394,8 @@ export class ProductionExchangeService implements IExchangeService {
    * Строит WebSocket URL для Binance ticker streams
    */
   private _buildWebSocketUrl(symbols: string[]): string {
-    // Преобразуем символы в формат для Binance streams (например, BTCUSDT -> btcusdt@ticker)
-    const streams = symbols.map((symbol) => `${symbol.toLowerCase()}@ticker`).join('/');
+    // Преобразуем символы в формат для Binance streams (например, BTC/USDT -> btcusdt@ticker)
+    const streams = symbols.map((symbol) => `${symbol.replace('/', '').toLowerCase()}@ticker`).join('/');
 
     if (this.appMode === 'testnet') {
       return `wss://testnet.binance.vision/stream?streams=${streams}`;

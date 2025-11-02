@@ -170,10 +170,10 @@ export class TSLHandlerService {
       const position = tslRule.position;
       const oppositeSide: 'buy' | 'sell' = position.side === 'long' ? 'sell' : 'buy';
 
-      // Используем STOP_LOSS_LIMIT для защиты от проскальзывания
+      // Используем stop_loss_limit для защиты от проскальзывания
       const newSlOrder = await this.guaranteedExecutor.createOrderWithRetry(
         pair,
-        'STOP_LOSS_LIMIT',
+        'stop_loss_limit',
         oppositeSide,
         position.amount,
         newStopPrice,

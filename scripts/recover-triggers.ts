@@ -77,8 +77,9 @@ async function recoverTriggers() {
 
     // Инициализация остальных сервисов
     const accountStateService = AccountStateService.getInstance(
-      databaseService,
+      configService,
       exchangeService,
+      databaseService,
       eventBus,
     );
     const notificationService = NotificationService.getInstance(accountStateService, configService);

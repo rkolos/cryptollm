@@ -398,7 +398,9 @@ export class ProductionExchangeService implements IExchangeService {
     const streams = symbols.map((symbol) => `${symbol.replace('/', '').toLowerCase()}@ticker`).join('/');
 
     if (this.appMode === 'testnet') {
-      return `wss://testnet.binance.vision/stream?streams=${streams}`;
+      // Правильный URL для Binance Spot Testnet WebSocket streams
+      // Документация: https://developers.binance.com/docs/binance-spot-api-docs/testnet/web-socket-streams
+      return `wss://stream.testnet.binance.vision/stream?streams=${streams}`;
     }
     return `wss://stream.binance.com:9443/stream?streams=${streams}`;
   }

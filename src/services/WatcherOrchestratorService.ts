@@ -6,6 +6,7 @@ import { PairActorManagerService } from './PairActorManagerService.js';
 import { AccountStateService } from './AccountStateService.js';
 import { ConfigService } from './ConfigService.js';
 import { MarketDataService } from './MarketDataService.js';
+import { GlobalStateService } from './GlobalStateService.js';
 import Decimal from 'decimal.js';
 import type { ILLMService } from '../interfaces/ILLMService.js';
 import type { LLMDecision, LLMResponse } from '../interfaces/ILLMTypes.js';
@@ -125,6 +126,13 @@ export class WatcherOrchestratorService {
    * Не является async, так как вызывается в режиме "fire-and-forget".
    */
   public executeOrchestration(pair: string, triggerReason: string): void {
+    // Проверка состояния shutdown - не начинаем новые задачи при завершении работы
+    const globalState = GlobalStateService.getInstance();
+    if (globalState.getIsShuttingDown()) {
+      this.logger.warn(`[${pair}] executeOrchestration пропущен: приложение завершает работу`);
+      return;
+    }
+
     const isRetryRequest = triggerReason.includes('ПОВТОРНЫЙ ЗАПРОС');
 
     // Проверка глубины рекурсии для повторных запросов

@@ -83,10 +83,22 @@ async function recoverTriggers() {
       eventBus,
     );
     const notificationService = NotificationService.getInstance(configService);
-    const taEngineService = TAEngineService.getInstance(databaseService);
+    notificationService.injectAccountStateService(accountStateService);
+    notificationService.injectDatabaseService(databaseService);
+    notificationService.injectExchangeService(exchangeService);
+    notificationService.injectExchangeRulesService(ExchangeRulesService.getInstance());
+    
+    const taEngineService = TAEngineService.getInstance();
     const marketDataService = MarketDataService.getInstance(exchangeService);
-    const watchlistOverviewService = WatchlistOverviewService.getInstance(marketDataService);
+    const watchlistOverviewService = WatchlistOverviewService.getInstance(
+      configService,
+      exchangeService,
+      marketDataService,
+      taEngineService,
+    );
     const macroContextService = MacroContextService.getInstance();
+    await macroContextService.initialize(); // Первая загрузка данных
+    
     const assemblerService = LLMRequestAssemblerService.getInstance(
       configService,
       databaseService,
@@ -101,22 +113,29 @@ async function recoverTriggers() {
     logger.info('Загрузка промптов LLM...');
     await assemblerService.initialize();
     logger.info('Промпты LLM загружены успешно.');
-    const validatorService = ValidatorService.getInstance(configService, exchangeService);
-    const guaranteedOrderService = GuaranteedOrderExecutionService.getInstance(exchangeService);
+    
+    const guaranteedOrderService = GuaranteedOrderExecutionService.getInstance();
+    guaranteedOrderService.initialize(exchangeService);
+    
+    const validatorService = ValidatorService.getInstance(ExchangeRulesService.getInstance());
     const workerService = WorkerService.getInstance(
-      databaseService,
-      exchangeService,
       validatorService,
       guaranteedOrderService,
-      accountStateService,
+      databaseService,
+      eventBus,
       notificationService,
+      globalState,
+      accountStateService,
+      ExchangeRulesService.getInstance(),
       configService,
     );
     const syncEngine = SyncEngineService.getInstance(
+      configService,
       databaseService,
       exchangeService,
       pairActorManager,
-      accountStateService,
+      ExchangeRulesService.getInstance(),
+      guaranteedOrderService,
     );
     const orchestrator = WatcherOrchestratorService.getInstance(
       databaseService,

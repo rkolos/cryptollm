@@ -96,6 +96,11 @@ async function recoverTriggers() {
       macroContextService,
       configService,
     );
+    
+    // Инициализация LLMRequestAssemblerService (загрузка промптов)
+    logger.info('Загрузка промптов LLM...');
+    await assemblerService.initialize();
+    logger.info('Промпты LLM загружены успешно.');
     const validatorService = ValidatorService.getInstance(configService, exchangeService);
     const guaranteedOrderService = GuaranteedOrderExecutionService.getInstance(exchangeService);
     const workerService = WorkerService.getInstance(
@@ -185,7 +190,7 @@ async function recoverTriggers() {
     await new Promise((resolve) => setTimeout(resolve, 2000));
 
     // Закрываем соединения
-    await DatabaseService.closePool();
+    await databaseService.closePool();
   } catch (error) {
     console.error('❌ Критическая ошибка при восстановлении:', error);
     process.exit(1);

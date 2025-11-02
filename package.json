@@ -29,6 +29,7 @@
     "create-triggers": "tsx ./scripts/create-initial-triggers.ts",
     "fill-triggers": "tsx ./scripts/fill-missing-triggers.ts",
     "add-timeout-triggers": "tsx ./scripts/add-missing-timeout-triggers.ts",
+    "add-volatile-pairs": "tsx ./scripts/add-volatile-pairs.ts",
     "check-triggers": "tsx ./scripts/check-triggers.ts",
     "clear-db": "tsx ./scripts/clear-database.ts",
     "mcp:postgres": "tsx ./scripts/start-mcp-postgres.ts",

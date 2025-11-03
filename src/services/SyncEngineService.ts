@@ -122,6 +122,10 @@ export class SyncEngineService {
     // чтобы распределить нагрузку на API биржи во времени.
     // Добавляем таймаут для каждой пары, чтобы зависание одной пары не блокировало остальные
     for (const pair of watchlist) {
+      // Добавляем задержку между парами, чтобы не перегружать API (500ms между парами)
+      if (watchlist.indexOf(pair) > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
       try {
         // Таймаут 30 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
         const reconcilePromise = this.reconcileStateForPair(pair);

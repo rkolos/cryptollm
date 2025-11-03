@@ -98,14 +98,14 @@ export class ProductionExchangeService implements IExchangeService {
     }
   }
 
-  private async execute<T>(fn: () => Promise<T>, maxRetries: number = 3): Promise<T> {
+  private async execute<T>(fn: () => Promise<T>, maxRetries: number = 5): Promise<T> {
     // Для testnet: синхронизируем время один раз при первом запросе
     if (this.appMode === 'testnet' && !this.timeSyncDone) {
       await this._syncTimeOnce();
     }
 
     let lastError: unknown;
-    const retryDelayMs = 1000; // Пауза между попытками: 1 секунда
+    const retryDelayMs = 2000; // Пауза между попытками: 2 секунды
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {

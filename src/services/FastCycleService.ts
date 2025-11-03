@@ -195,14 +195,29 @@ export class FastCycleService {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const positionProfit = (grossProfit as any).minus(totalFees) as DecimalValue;
 
-          // Суммируем прибыль по всем позициям
+          // Суммируем прибыль/убыток по всем позициям (включая отрицательные значения)
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           totalProfit = (totalProfit as any).plus(positionProfit) as DecimalValue;
+
+          // Логируем расчет для каждой позиции для отладки
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const positionProfitNum = (positionProfit as any).toNumber();
+          this.logger.debug(
+            `[${position.pair}] ${position.side.toUpperCase()} позиция: ` +
+              `объем=${amountDecimal.toString()}, ` +
+              `вход=${entryPriceDecimal.toString()}, ` +
+              `текущая=${currentPriceDecimal.toString()}, ` +
+              `прибыль/убыток=${positionProfitNum.toFixed(4)} USDT`,
+          );
         } catch (error) {
           this.logger.warn(`Ошибка при расчете прибыли для позиции ${position.pair}:`, error);
           // Продолжаем с другими позициями
         }
       }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const totalProfitNum = (totalProfit as any).toNumber();
+      this.logger.info(`Общая прибыль портфеля: ${totalProfitNum.toFixed(4)} USDT (${openPositions.length} позиций)`);
 
       return totalProfit;
     } catch (error) {

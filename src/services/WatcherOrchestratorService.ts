@@ -506,8 +506,10 @@ export class WatcherOrchestratorService {
                       false,
                     );
 
-                    // Обновляем кэш AccountStateService, чтобы удалить триггеры из памяти
-                    await this.accountStateService.refreshNow();
+                    // Обновляем кэш AccountStateService асинхронно (fire-and-forget), чтобы избежать race condition
+                    this.accountStateService.refreshNow().catch((error) => {
+                      this.logger.error(`[${pair}] Ошибка при асинхронном обновлении AccountState:`, error);
+                    });
 
                     // Получаем актуальное состояние счета для формирования детального описания проблемы
                     const currentAccountState = this.accountStateService.getAccountState();

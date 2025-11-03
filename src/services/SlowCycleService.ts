@@ -375,8 +375,34 @@ export class SlowCycleService {
   private async _checkTriggers(): Promise<void> {
     try {
       this.logger.info('(SlowCycle) Начало проверки триггеров...');
-      const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
-      const allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
+
+      // Добавляем retry логику для защиты от race condition
+      let allTriggers: DbTrigger[] = [];
+      const maxRetries = 3;
+
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
+          allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
+
+          // Проверяем консистентность данных (базовая валидация)
+          const invalidTriggers = allTriggers.filter(trigger =>
+            !trigger.pair || !trigger.trigger_conditions_json
+          );
+
+          if (invalidTriggers.length > 0) {
+            this.logger.warn(`(SlowCycle) Найдены некорректные записи триггеров (${invalidTriggers.length}). Повторная попытка ${attempt + 1}/${maxRetries}...`);
+            await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1))); // Задержка перед retry
+            continue;
+          }
+
+          break; // Данные корректны, выходим из цикла retry
+        } catch (error) {
+          this.logger.warn(`(SlowCycle) Ошибка при чтении триггеров, попытка ${attempt + 1}/${maxRetries}:`, error);
+          if (attempt === maxRetries - 1) throw error;
+          await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+        }
+      }
 
       this.logger.info(`(SlowCycle) Проверка триггеров: найдено ${allTriggers.length} записей в llm_triggers`);
 

@@ -136,14 +136,60 @@ export class AccountStateService {
       try {
         this.logger.debug('Refreshing account state...');
 
-        // Параллельный запрос данных из всех источников
-        const [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult, dbLlmTriggersResult] = await Promise.all([
-          this.exchangeService.fetchBalance(),
-          this.databaseService.query('SELECT * FROM ActivePositions'),
-          this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
-          this.databaseService.query('SELECT * FROM TSL_State'),
-          this.databaseService.query('SELECT * FROM llm_triggers'),
-        ]);
+        // Параллельный запрос данных из всех источников с retry для защиты от race condition
+        const maxRetries = 2;
+        let balance: any;
+        let dbPositionsResult: any;
+        let dbOrdersResult: any;
+        let dbTslStateResult: any;
+        let dbLlmTriggersResult: any;
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          try {
+            [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult, dbLlmTriggersResult] = await Promise.all([
+              this.exchangeService.fetchBalance(),
+              this.databaseService.query('SELECT * FROM ActivePositions'),
+              this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
+              this.databaseService.query('SELECT * FROM TSL_State'),
+              this.databaseService.query('SELECT * FROM llm_triggers'),
+            ]);
+
+            // Базовая валидация консистентности данных
+            const positions = dbPositionsResult?.rows || [];
+            const orders = dbOrdersResult?.rows || [];
+            const tslStates = dbTslStateResult?.rows || [];
+            const triggers = dbLlmTriggersResult?.rows || [];
+
+            // Проверяем, что все данные получены
+            if (!Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(tslStates) || !Array.isArray(triggers)) {
+              throw new Error('Invalid data types received from database');
+            }
+
+            // Проверяем соответствие позиций и ордеров
+            const positionPairs = new Set(positions.map((p: any) => p.pair));
+            const orderPairs = new Set(orders.map((o: any) => o.pair));
+            const tslPairs = new Set(tslStates.map((t: any) => t.pair));
+
+            // Если есть несоответствия, логируем предупреждение
+            for (const pair of positionPairs) {
+              if (!orderPairs.has(pair) && !tslPairs.has(pair)) {
+                this.logger.debug(`[AccountState] Позиция ${pair} существует без связанных ордеров/TSL - возможно, это нормально`);
+              }
+            }
+
+            break; // Данные корректны
+
+          } catch (error) {
+            this.logger.warn(`AccountState refresh attempt ${attempt + 1}/${maxRetries} failed:`, error);
+            if (attempt === maxRetries - 1) throw error;
+            await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
+          }
+        }
+
+        // Проверяем, что данные получены (защита от undefined)
+        if (!balance || !dbPositionsResult || !dbOrdersResult || !dbTslStateResult || !dbLlmTriggersResult) {
+          throw new Error('Failed to fetch account data after retries');
+        }
 
         // Парсинг баланса
         const quoteCurrency = 'USDT'; // Для V1 используем фиксированный USDT

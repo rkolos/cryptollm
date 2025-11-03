@@ -161,6 +161,8 @@ async function closeAllPositionsAndSellToUSDT() {
   LoggingService.initialize();
   const logger = LoggingService.getInstance().getLogger('CloseAll');
 
+  // Инициализируем DatabaseService
+  await DatabaseService.initialize();
   const databaseService = DatabaseService.getInstance();
   const eventBus = EventBusService.getInstance();
   const notificationService = NotificationService.getInstance();

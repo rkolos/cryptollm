@@ -743,10 +743,12 @@ export class WatcherOrchestratorService {
           condition: condition.condition,
           value: newValue,
           name: condition.name,
-          timeframe: condition.timeframe
+          timeframe: condition.timeframe,
         };
 
-        this.logger.debug(`[${pair}] Распределение timeout триггера: ${originalValue} → ${newValue} мин (задержка +${randomDelay} мин)`);
+        this.logger.debug(
+          `[${pair}] Распределение timeout триггера: ${originalValue} → ${newValue} мин (задержка +${randomDelay} мин)`,
+        );
       }
     }
 

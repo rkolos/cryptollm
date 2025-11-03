@@ -386,13 +386,13 @@ export class SlowCycleService {
           allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
 
           // Проверяем консистентность данных (базовая валидация)
-          const invalidTriggers = allTriggers.filter(trigger =>
-            !trigger.pair || !trigger.trigger_conditions_json
-          );
+          const invalidTriggers = allTriggers.filter((trigger) => !trigger.pair || !trigger.trigger_conditions_json);
 
           if (invalidTriggers.length > 0) {
-            this.logger.warn(`(SlowCycle) Найдены некорректные записи триггеров (${invalidTriggers.length}). Повторная попытка ${attempt + 1}/${maxRetries}...`);
-            await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1))); // Задержка перед retry
+            this.logger.warn(
+              `(SlowCycle) Найдены некорректные записи триггеров (${invalidTriggers.length}). Повторная попытка ${attempt + 1}/${maxRetries}...`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1))); // Задержка перед retry
             continue;
           }
 
@@ -400,7 +400,7 @@ export class SlowCycleService {
         } catch (error) {
           this.logger.warn(`(SlowCycle) Ошибка при чтении триггеров, попытка ${attempt + 1}/${maxRetries}:`, error);
           if (attempt === maxRetries - 1) throw error;
-          await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
         }
       }
 

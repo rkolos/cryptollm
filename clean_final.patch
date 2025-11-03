@@ -1,0 +1,739 @@
+From ecebda3e2d7c859da2c6882f4eef019416aa6865 Mon Sep 17 00:00:00 2001
+From: Roman Kolos <kolos.roman@gmail.com>
+Date: Mon, 3 Nov 2025 09:13:39 +0200
+Subject: [PATCH] refactor: code cleanup and notification improvements
+
+- ExchangeRulesService: refactor loadRulesForPair method signature
+- NotificationService: remove redundant trigger update header in messages
+- WorkerService: optimize notifications - remove justification text and disable AccountState for non-critical actions
+- DatabaseService: code formatting cleanup
+- recover-triggers.ts: formatting and whitespace cleanup
+
++ Added patch files for recent fixes:
+  - deadlock_fix.patch: prevent deadlock in WatcherOrchestratorService
+  - race_condition_fix.patch: fix race conditions in account state reading
+  - api_improvements.patch: improve SyncEngine reliability
+  - slowcycle_fix.patch: fix trigger update timing
+  - xrp_restore_and_sync_fix.patch: restore XRP position and sync fixes
+---
+ api_improvements.patch               |  50 +++++++++
+ deadlock_fix.patch                   |  49 +++++++++
+ race_condition_fix.patch             | 146 +++++++++++++++++++++++++
+ scripts/recover-triggers.ts          |  17 ++-
+ slowcycle_fix.patch                  |  44 ++++++++
+ src/services/DatabaseService.ts      |  24 ++---
+ src/services/ExchangeRulesService.ts |   5 +-
+ src/services/NotificationService.ts  |  63 -----------
+ src/services/WorkerService.ts        |   6 +-
+ xrp_restore_and_sync_fix.patch       | 155 +++++++++++++++++++++++++++
+ 10 files changed, 468 insertions(+), 91 deletions(-)
+ create mode 100644 api_improvements.patch
+ create mode 100644 deadlock_fix.patch
+ create mode 100644 race_condition_fix.patch
+ create mode 100644 slowcycle_fix.patch
+ create mode 100644 xrp_restore_and_sync_fix.patch
+
+diff --git a/api_improvements.patch b/api_improvements.patch
+new file mode 100644
+index 0000000..289819d
+--- /dev/null
+@@ -0,0 +1,50 @@
++From cbd9bfba5aa356835b58fab1b53ee2bfe0096e57 Mon Sep 17 00:00:00 2001
++From: Roman Kolos <kolos.roman@gmail.com>
++Date: Mon, 3 Nov 2025 06:22:31 +0200
++Subject: [PATCH] fix: improve API reliability - add delays between sync
++ requests and increase retry attempts for network errors
++
++---
++ src/services/ProductionExchangeService.ts | 4 ++--
++ src/services/SyncEngineService.ts         | 4 ++++
++ 2 files changed, 6 insertions(+), 2 deletions(-)
++
++diff --git a/src/services/ProductionExchangeService.ts b/src/services/ProductionExchangeService.ts
++index 561fcda..a582e8b 100644
++--- a/src/services/ProductionExchangeService.ts
+++++ b/src/services/ProductionExchangeService.ts
++@@ -98,14 +98,14 @@ export class ProductionExchangeService implements IExchangeService {
++     }
++   }
++ 
++-  private async execute<T>(fn: () => Promise<T>, maxRetries: number = 3): Promise<T> {
+++  private async execute<T>(fn: () => Promise<T>, maxRetries: number = 5): Promise<T> {
++     // Для testnet: синхронизируем время один раз при первом запросе
++     if (this.appMode === 'testnet' && !this.timeSyncDone) {
++       await this._syncTimeOnce();
++     }
++ 
++     let lastError: unknown;
++-    const retryDelayMs = 1000; // Пауза между попытками: 1 секунда
+++    const retryDelayMs = 2000; // Пауза между попытками: 2 секунды
++ 
++     for (let attempt = 0; attempt < maxRetries; attempt++) {
++       try {
++diff --git a/src/services/SyncEngineService.ts b/src/services/SyncEngineService.ts
++index a6aec93..7b02e1b 100644
++--- a/src/services/SyncEngineService.ts
+++++ b/src/services/SyncEngineService.ts
++@@ -122,6 +122,10 @@ export class SyncEngineService {
++     // чтобы распределить нагрузку на API биржи во времени.
++     // Добавляем таймаут для каждой пары, чтобы зависание одной пары не блокировало остальные
++     for (const pair of watchlist) {
+++      // Добавляем задержку между парами, чтобы не перегружать API (500ms между парами)
+++      if (watchlist.indexOf(pair) > 0) {
+++        await new Promise((resolve) => setTimeout(resolve, 500));
+++      }
++       try {
++         // Таймаут 30 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
++         const reconcilePromise = this.reconcileStateForPair(pair);
++-- 
++2.49.0
++
+diff --git a/deadlock_fix.patch b/deadlock_fix.patch
+new file mode 100644
+index 0000000..1dc3932
+--- /dev/null
+@@ -0,0 +1,49 @@
++From c34cea76b63be4238cc5b3ff9f9527ea2c6f82b3 Mon Sep 17 00:00:00 2001
++From: Roman Kolos <kolos.roman@gmail.com>
++Date: Mon, 3 Nov 2025 08:55:13 +0200
++Subject: [PATCH] fix: prevent deadlock in WatcherOrchestratorService by making
++ post-sync async
++
++---
++ src/services/WatcherOrchestratorService.ts | 24 ++++++++++++++--------
++ 1 file changed, 15 insertions(+), 9 deletions(-)
++
++diff --git a/src/services/WatcherOrchestratorService.ts b/src/services/WatcherOrchestratorService.ts
++index d59f154..10e43d6 100644
++--- a/src/services/WatcherOrchestratorService.ts
+++++ b/src/services/WatcherOrchestratorService.ts
++@@ -648,16 +648,22 @@ export class WatcherOrchestratorService {
++             }
++           }
++ 
++-          // Шаг 6: Пост-Сверка (критично - только если есть решения)
+++          // Шаг 6: Пост-Сверка (асинхронно - fire-and-forget, чтобы избежать deadlock)
++           if (llmResponse.decisions.length > 0) {
++-            this.logger.info(`[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации...`);
++-            try {
++-              await this.syncEngine.reconcileStateForPair(pair);
++-              this.logger.info(`[${pair}] Пост-синхронизация завершена успешно.`);
++-            } catch (error) {
++-              this.logger.error(`[${pair}] Ошибка при пост-синхронизации:`, error);
++-              // Не прерываем выполнение, так как это не критическая ошибка
++-            }
+++            this.logger.info(
+++              `[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации (асинхронно)...`,
+++            );
+++
+++            // АСИНХРОННЫЙ ВЫЗОВ: не ждем завершения, чтобы избежать deadlock с pairActorManager
+++            this.syncEngine
+++              .reconcileStateForPair(pair)
+++              .then(() => {
+++                this.logger.info(`[${pair}] Пост-синхронизация завершена успешно.`);
+++              })
+++              .catch((error) => {
+++                this.logger.error(`[${pair}] Ошибка при пост-синхронизации:`, error);
+++                // Не критичная ошибка - просто логируем
+++              });
++           } else {
++             this.logger.debug(`[${pair}] Нет решений для исполнения. Пост-синхронизация не требуется.`);
++           }
++-- 
++2.49.0
++
+diff --git a/race_condition_fix.patch b/race_condition_fix.patch
+new file mode 100644
+index 0000000..0f2a607
+--- /dev/null
+@@ -0,0 +1,146 @@
++From 23a0b670b6ddb0a70f739ec259a3dadcdbaffd9e Mon Sep 17 00:00:00 2001
++From: Roman Kolos <kolos.roman@gmail.com>
++Date: Mon, 3 Nov 2025 09:04:11 +0200
++Subject: [PATCH] fix: prevent race conditions in account state and trigger
++ reading
++
++---
++ src/services/AccountStateService.ts        | 62 +++++++++++++++++++---
++ src/services/SlowCycleService.ts           | 30 ++++++++++-
++ src/services/WatcherOrchestratorService.ts |  6 ++-
++ 3 files changed, 86 insertions(+), 12 deletions(-)
++
++diff --git a/src/services/AccountStateService.ts b/src/services/AccountStateService.ts
++index 59030b4..6f78ce3 100644
++--- a/src/services/AccountStateService.ts
+++++ b/src/services/AccountStateService.ts
++@@ -136,14 +136,60 @@ export class AccountStateService {
++       try {
++         this.logger.debug('Refreshing account state...');
++ 
++-        // Параллельный запрос данных из всех источников
++-        const [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult, dbLlmTriggersResult] = await Promise.all([
++-          this.exchangeService.fetchBalance(),
++-          this.databaseService.query('SELECT * FROM ActivePositions'),
++-          this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
++-          this.databaseService.query('SELECT * FROM TSL_State'),
++-          this.databaseService.query('SELECT * FROM llm_triggers'),
++-        ]);
+++        // Параллельный запрос данных из всех источников с retry для защиты от race condition
+++        const maxRetries = 2;
+++        let balance: any;
+++        let dbPositionsResult: any;
+++        let dbOrdersResult: any;
+++        let dbTslStateResult: any;
+++        let dbLlmTriggersResult: any;
+++
+++        for (let attempt = 0; attempt < maxRetries; attempt++) {
+++          try {
+++            [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult, dbLlmTriggersResult] = await Promise.all([
+++              this.exchangeService.fetchBalance(),
+++              this.databaseService.query('SELECT * FROM ActivePositions'),
+++              this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
+++              this.databaseService.query('SELECT * FROM TSL_State'),
+++              this.databaseService.query('SELECT * FROM llm_triggers'),
+++            ]);
+++
+++            // Базовая валидация консистентности данных
+++            const positions = dbPositionsResult?.rows || [];
+++            const orders = dbOrdersResult?.rows || [];
+++            const tslStates = dbTslStateResult?.rows || [];
+++            const triggers = dbLlmTriggersResult?.rows || [];
+++
+++            // Проверяем, что все данные получены
+++            if (!Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(tslStates) || !Array.isArray(triggers)) {
+++              throw new Error('Invalid data types received from database');
+++            }
+++
+++            // Проверяем соответствие позиций и ордеров
+++            const positionPairs = new Set(positions.map((p: any) => p.pair));
+++            const orderPairs = new Set(orders.map((o: any) => o.pair));
+++            const tslPairs = new Set(tslStates.map((t: any) => t.pair));
+++
+++            // Если есть несоответствия, логируем предупреждение
+++            for (const pair of positionPairs) {
+++              if (!orderPairs.has(pair) && !tslPairs.has(pair)) {
+++                this.logger.debug(`[AccountState] Позиция ${pair} существует без связанных ордеров/TSL - возможно, это нормально`);
+++              }
+++            }
+++
+++            break; // Данные корректны
+++
+++          } catch (error) {
+++            this.logger.warn(`AccountState refresh attempt ${attempt + 1}/${maxRetries} failed:`, error);
+++            if (attempt === maxRetries - 1) throw error;
+++            await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
+++          }
+++        }
+++
+++        // Проверяем, что данные получены (защита от undefined)
+++        if (!balance || !dbPositionsResult || !dbOrdersResult || !dbTslStateResult || !dbLlmTriggersResult) {
+++          throw new Error('Failed to fetch account data after retries');
+++        }
++ 
++         // Парсинг баланса
++         const quoteCurrency = 'USDT'; // Для V1 используем фиксированный USDT
++diff --git a/src/services/SlowCycleService.ts b/src/services/SlowCycleService.ts
++index a4e167b..6360472 100644
++--- a/src/services/SlowCycleService.ts
+++++ b/src/services/SlowCycleService.ts
++@@ -375,8 +375,34 @@ export class SlowCycleService {
++   private async _checkTriggers(): Promise<void> {
++     try {
++       this.logger.info('(SlowCycle) Начало проверки триггеров...');
++-      const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
++-      const allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
+++
+++      // Добавляем retry логику для защиты от race condition
+++      let allTriggers: DbTrigger[] = [];
+++      const maxRetries = 3;
+++
+++      for (let attempt = 0; attempt < maxRetries; attempt++) {
+++        try {
+++          const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
+++          allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
+++
+++          // Проверяем консистентность данных (базовая валидация)
+++          const invalidTriggers = allTriggers.filter(trigger =>
+++            !trigger.pair || !trigger.trigger_conditions_json
+++          );
+++
+++          if (invalidTriggers.length > 0) {
+++            this.logger.warn(`(SlowCycle) Найдены некорректные записи триггеров (${invalidTriggers.length}). Повторная попытка ${attempt + 1}/${maxRetries}...`);
+++            await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1))); // Задержка перед retry
+++            continue;
+++          }
+++
+++          break; // Данные корректны, выходим из цикла retry
+++        } catch (error) {
+++          this.logger.warn(`(SlowCycle) Ошибка при чтении триггеров, попытка ${attempt + 1}/${maxRetries}:`, error);
+++          if (attempt === maxRetries - 1) throw error;
+++          await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+++        }
+++      }
++ 
++       this.logger.info(`(SlowCycle) Проверка триггеров: найдено ${allTriggers.length} записей в llm_triggers`);
++ 
++diff --git a/src/services/WatcherOrchestratorService.ts b/src/services/WatcherOrchestratorService.ts
++index 10e43d6..db97986 100644
++--- a/src/services/WatcherOrchestratorService.ts
+++++ b/src/services/WatcherOrchestratorService.ts
++@@ -506,8 +506,10 @@ export class WatcherOrchestratorService {
++                       false,
++                     );
++ 
++-                    // Обновляем кэш AccountStateService, чтобы удалить триггеры из памяти
++-                    await this.accountStateService.refreshNow();
+++                    // Обновляем кэш AccountStateService асинхронно (fire-and-forget), чтобы избежать race condition
+++                    this.accountStateService.refreshNow().catch((error) => {
+++                      this.logger.error(`[${pair}] Ошибка при асинхронном обновлении AccountState:`, error);
+++                    });
++ 
++                     // Получаем актуальное состояние счета для формирования детального описания проблемы
++                     const currentAccountState = this.accountStateService.getAccountState();
++-- 
++2.49.0
++
+diff --git a/scripts/recover-triggers.ts b/scripts/recover-triggers.ts
+index 5aa69fe..e0c9e03 100644
+--- a/scripts/recover-triggers.ts
++++ b/scripts/recover-triggers.ts
+@@ -51,7 +51,7 @@ async function recoverTriggers() {
+     // Инициализация Exchange и LLM сервисов
+     const exchangeService = new ProductionExchangeService();
+     const llmService = new ProductionLLMService();
+-    
++
+     // Определяем пары для восстановления (если не указаны, используем все из БД)
+     let targetPairs: string[] = [];
+     if (pairsToRecover.length > 0) {
+@@ -60,11 +60,11 @@ async function recoverTriggers() {
+       const triggersResult = await databaseService.query('SELECT pair FROM LLM_Triggers ORDER BY pair');
+       targetPairs = triggersResult.rows.map((row: { pair: string }) => row.pair);
+     }
+-    
++
+     // Загружаем правила только для нужных пар
+     logger.info('Загрузка правил биржи для восстанавливаемых пар...');
+     ExchangeRulesService.instance = ExchangeRulesService.instance || new ExchangeRulesService();
+-    
++
+     for (const pair of targetPairs) {
+       const rules = await ExchangeRulesService.loadRulesForPair(pair, exchangeService);
+       if (rules) {
+@@ -87,7 +87,7 @@ async function recoverTriggers() {
+     notificationService.injectDatabaseService(databaseService);
+     notificationService.injectExchangeService(exchangeService);
+     notificationService.injectExchangeRulesService(ExchangeRulesService.getInstance());
+-    
++
+     const taEngineService = TAEngineService.getInstance();
+     const marketDataService = MarketDataService.getInstance(exchangeService);
+     const watchlistOverviewService = WatchlistOverviewService.getInstance(
+@@ -98,7 +98,7 @@ async function recoverTriggers() {
+     );
+     const macroContextService = MacroContextService.getInstance();
+     await macroContextService.initialize(); // Первая загрузка данных
+-    
++
+     const assemblerService = LLMRequestAssemblerService.getInstance(
+       configService,
+       databaseService,
+@@ -108,15 +108,15 @@ async function recoverTriggers() {
+       accountStateService,
+       macroContextService,
+     );
+-    
++
+     // Инициализация LLMRequestAssemblerService (загрузка промптов)
+     logger.info('Загрузка промптов LLM...');
+     await assemblerService.initialize();
+     logger.info('Промпты LLM загружены успешно.');
+-    
++
+     const guaranteedOrderService = GuaranteedOrderExecutionService.getInstance();
+     guaranteedOrderService.initialize(exchangeService);
+-    
++
+     const validatorService = ValidatorService.getInstance(ExchangeRulesService.getInstance());
+     const workerService = WorkerService.getInstance(
+       validatorService,
+@@ -222,4 +222,3 @@ recoverTriggers().catch((error) => {
+   console.error('Fatal error:', error);
+   process.exit(1);
+ });
+-
+diff --git a/slowcycle_fix.patch b/slowcycle_fix.patch
+new file mode 100644
+index 0000000..7c4c140
+--- /dev/null
+@@ -0,0 +1,44 @@
++From fb04f5d11a056e4675d0c42c18742410ffbfbcf3 Mon Sep 17 00:00:00 2001
++From: Roman Kolos <kolos.roman@gmail.com>
++Date: Mon, 3 Nov 2025 06:20:12 +0200
++Subject: [PATCH] fix: SlowCycle now updates trigger updated_at after firing to
++ prevent continuous retriggering
++
++---
++ src/services/SlowCycleService.ts | 19 +++++++++++++++++--
++ 1 file changed, 17 insertions(+), 2 deletions(-)
++
++diff --git a/src/services/SlowCycleService.ts b/src/services/SlowCycleService.ts
++index 77313db..a4e167b 100644
++--- a/src/services/SlowCycleService.ts
+++++ b/src/services/SlowCycleService.ts
++@@ -526,9 +526,24 @@ export class SlowCycleService {
++               }
++             }
++ 
++-            // Если триггер сработал, запускаем оркестрацию и прерываем цикл для этой пары
+++            // Если триггер сработал, обновляем время последнего срабатывания и запускаем оркестрацию
++             if (triggerHit) {
++-              this.logger.info(`(SlowCycle) [${pair}] Триггер сработал! Запуск оркестрации LLM запроса...`);
+++              this.logger.info(
+++                `(SlowCycle) [${pair}] Триггер сработал! Обновляю время последнего срабатывания и запускаю оркестрацию...`,
+++              );
+++
+++              // Обновляем updated_at для триггера, чтобы сбросить таймер
+++              try {
+++                await this.databaseService.query('UPDATE llm_triggers SET updated_at = NOW() WHERE pair = $1', [pair]);
+++                this.logger.debug(`(SlowCycle) [${pair}] Время последнего срабатывания обновлено`);
+++              } catch (updateError) {
+++                this.logger.error(
+++                  `(SlowCycle) [${pair}] Ошибка при обновлении времени срабатывания триггера:`,
+++                  updateError,
+++                );
+++                // Продолжаем выполнение, так как это не критично
+++              }
+++
++               this.orchestrator.executeOrchestration(
++                 pair,
++                 `SlowCycle Trigger: ${condition.type} (${condition.name || 'timeout'})`,
++-- 
++2.49.0
++
+diff --git a/src/services/DatabaseService.ts b/src/services/DatabaseService.ts
+index 2d11972..e6e8301 100644
+--- a/src/services/DatabaseService.ts
++++ b/src/services/DatabaseService.ts
+@@ -172,14 +172,14 @@ export class DatabaseService {
+     }
+ 
+     this.logger.info('Closing database connection pool...');
+-    
++
+     // ????????????? ???? ????????, ????? ????? ???????? ?? ???????? ???????????
+     this.isPoolClosed = true;
+ 
+     // ???? ?????????? ???? ???????? ????????
+     if (this.activeOperationsCount > 0) {
+       this.logger.info(`Waiting for ${this.activeOperationsCount} active operations to complete...`);
+-      
++
+       // ??????? Promise, ??????? ?????????? ????? ??? ???????? ??????????
+       this.closePoolPromise = new Promise<void>((resolve) => {
+         this.closePoolResolve = resolve;
+@@ -188,16 +188,16 @@ export class DatabaseService {
+       // ???? ??????? ??? ???? ?? 0, ????????? ?????
+       // ???? ?????????? ???? ???????? (? ????????? ?? ?????? ???????)
+       await Promise.race([
+-          this.closePoolPromise,
+-          new Promise<void>((resolve) => {
+-            setTimeout(() => {
+-              this.logger.warn(
+-                `Timeout waiting for operations to complete. Active operations: ${this.activeOperationsCount}. Proceeding with pool closure.`,
+-              );
+-              resolve();
+-            }, 30000); // 30 ?????? ???????
+-          }),
+-        ]);
++        this.closePoolPromise,
++        new Promise<void>((resolve) => {
++          setTimeout(() => {
++            this.logger.warn(
++              `Timeout waiting for operations to complete. Active operations: ${this.activeOperationsCount}. Proceeding with pool closure.`,
++            );
++            resolve();
++          }, 30000); // 30 ?????? ???????
++        }),
++      ]);
+     }
+ 
+     try {
+diff --git a/src/services/ExchangeRulesService.ts b/src/services/ExchangeRulesService.ts
+index de3becb..0f791f2 100644
+--- a/src/services/ExchangeRulesService.ts
++++ b/src/services/ExchangeRulesService.ts
+@@ -107,10 +107,7 @@ export class ExchangeRulesService {
+   /**
+    * Загружает правила для конкретной пары (для использования в скриптах восстановления)
+    */
+-  public static async loadRulesForPair(
+-    pair: string,
+-    exchangeService: IExchangeService,
+-  ): Promise<IMarketRules | null> {
++  public static async loadRulesForPair(pair: string, exchangeService: IExchangeService): Promise<IMarketRules | null> {
+     await exchangeService.loadMarkets();
+     const rawMarkets = exchangeService.getRawMarkets();
+     const market = rawMarkets[pair] as Record<string, unknown> | undefined;
+diff --git a/src/services/NotificationService.ts b/src/services/NotificationService.ts
+index e57de0c..7c43119 100644
+--- a/src/services/NotificationService.ts
++++ b/src/services/NotificationService.ts
+@@ -804,10 +804,6 @@ export class NotificationService {
+   ): string {
+     const lines: string[] = [];
+ 
+-    // Заголовок
+-    lines.push(`*🔔 ТРИГГЕРЫ ОБНОВЛЕНЫ:*`);
+-    lines.push('');
+-
+     // Пара
+     const pairEscaped = this._escapeMarkdown(pair);
+     lines.push(`*Пара:* ${pairEscaped}`);
+@@ -820,65 +816,6 @@ export class NotificationService {
+     const updatedAtStr = updatedAt.toLocaleString('ru-RU');
+     const updatedAtEscaped = this._escapeMarkdown(updatedAtStr);
+     lines.push(`*Обновлено:* ${updatedAtEscaped}`);
+-    lines.push('');
+-
+-    // Условия триггеров
+-    lines.push(`*Условия триггеров \\(${triggerConditions.length}\\):*`);
+-    for (let i = 0; i < triggerConditions.length; i++) {
+-      const condition = triggerConditions[i];
+-      if (!condition) {
+-        continue;
+-      }
+-
+-      const type = this._escapeMarkdown(condition.type);
+-      const conditionStr = condition.condition ? this._escapeMarkdown(condition.condition) : '';
+-
+-      let displayValue = condition.value.toString();
+-      if (condition.type === 'timeout' && condition.condition === 'minutes_passed') {
+-        // Для timeout триггеров показываем минуты и время до срабатывания
+-        const updatedAtTime = updatedAt.getTime();
+-        const minutesPassed = Math.floor((Date.now() - updatedAtTime) / 60000);
+-        const requiredMinutes = condition.value;
+-        const remainingMinutes = requiredMinutes - minutesPassed;
+-        if (remainingMinutes <= 0) {
+-          displayValue = `${condition.value} минут (ПРОСРОЧЕН на ${Math.abs(remainingMinutes)} мин)`;
+-        } else {
+-          displayValue = `${condition.value} минут (осталось ${remainingMinutes} мин до срабатывания)`;
+-        }
+-      } else if (condition.type === 'price') {
+-        // Для price триггеров показываем цену
+-        displayValue = condition.value.toString();
+-      } else if (condition.type === 'indicator') {
+-        // Для indicator триггеров показываем значение индикатора
+-        displayValue = condition.value.toString();
+-      }
+-
+-      const valueEscaped = this._escapeMarkdown(displayValue);
+-      lines.push(`  ${i + 1}\\. *Тип:* ${type}`);
+-
+-      if (conditionStr) {
+-        lines.push(`     *Условие:* ${conditionStr}`);
+-      }
+-
+-      if (condition.name) {
+-        const nameEscaped = this._escapeMarkdown(condition.name);
+-        lines.push(`     *Индикатор:* ${nameEscaped}`);
+-      }
+-
+-      if (condition.timeframe) {
+-        const timeframeEscaped = this._escapeMarkdown(condition.timeframe);
+-        lines.push(`     *Таймфрейм:* ${timeframeEscaped}`);
+-      }
+-
+-      lines.push(`     *Значение:* \`${valueEscaped}\``);
+-      lines.push('');
+-    }
+-
+-    // Запрошенные данные
+-    if (requestedData && requestedData.length > 0) {
+-      const requestedDataEscaped = requestedData.map((item) => this._escapeMarkdown(item)).join(', ');
+-      lines.push(`*Запрошенные данные:* ${requestedDataEscaped}`);
+-    }
+ 
+     return lines.join('\n');
+   }
+diff --git a/src/services/WorkerService.ts b/src/services/WorkerService.ts
+index 5e2df99..538b9ce 100644
+--- a/src/services/WorkerService.ts
++++ b/src/services/WorkerService.ts
+@@ -353,10 +353,10 @@ export class WorkerService {
+           decision.justification || 'Обоснование не предоставлено',
+         );
+       } else {
+-        // Для других действий отправляем обычное уведомление с обоснованием
++        // Для других действий отправляем обычное уведомление без обоснования
+         this.notificationService.sendAlert(
+-          `[${pair}] ИСПОЛНЕНО: ${decision.action}\n\n🤖 Обоснование LLM:\n${decision.justification || 'Обоснование не предоставлено'}`,
+-          true, // Включить AccountState
++          `[${pair}] ИСПОЛНЕНО: ${decision.action}`,
++          false, // Не включать AccountState
+         );
+       }
+     } catch (executionError) {
+diff --git a/xrp_restore_and_sync_fix.patch b/xrp_restore_and_sync_fix.patch
+new file mode 100644
+index 0000000..f5358e3
+--- /dev/null
+@@ -0,0 +1,155 @@
++From 86dd807550f29fc6b7f5862889b360002812669a Mon Sep 17 00:00:00 2001
++From: Roman Kolos <kolos.roman@gmail.com>
++Date: Mon, 3 Nov 2025 08:13:59 +0200
++Subject: [PATCH] fix: restore XRP position in DB and increase SyncEngine
++ timeouts
++
++---
++ scripts/restore-xrp-position.ts   | 105 ++++++++++++++++++++++++++++++
++ src/services/SyncEngineService.ts |   8 +--
++ 2 files changed, 109 insertions(+), 4 deletions(-)
++ create mode 100644 scripts/restore-xrp-position.ts
++
++diff --git a/scripts/restore-xrp-position.ts b/scripts/restore-xrp-position.ts
++new file mode 100644
++index 0000000..df2b03f
++--- /dev/null
+++++ b/scripts/restore-xrp-position.ts
++@@ -0,0 +1,105 @@
+++import { config } from 'dotenv';
+++import { Pool } from 'pg';
+++
+++config();
+++
+++const pool = new Pool({
+++  host: process.env.DB_HOST || 'localhost',
+++  port: parseInt(process.env.DB_PORT || '5432'),
+++  user: process.env.DB_USER || 'cryptollm',
+++  password: process.env.DB_PASSWORD || 'cryptollm',
+++  database: process.env.DB_NAME || 'cryptollm',
+++});
+++
+++async function restoreXRPPosition() {
+++  console.log('🔧 Восстановление позиции XRP/USDT в БД...\n');
+++
+++  try {
+++    // Проверяем текущие позиции XRP
+++    const existingPosition = await pool.query('SELECT * FROM activepositions WHERE pair = $1', ['XRP/USDT']);
+++
+++    if (existingPosition.rows.length > 0) {
+++      console.log('⚠️  Позиция XRP/USDT уже существует в БД:', existingPosition.rows[0]);
+++      return;
+++    }
+++
+++    // Получаем последний лог LLM для XRP для понимания параметров позиции
+++    const lastLLMLog = await pool.query(
+++      `SELECT response_payload_json
+++       FROM llm_decision_log
+++       WHERE triggered_pair = $1 AND decision_result = 'accepted'
+++       ORDER BY timestamp DESC LIMIT 1`,
+++      ['XRP/USDT'],
+++    );
+++
+++    let entryPrice = '2.5499'; // Значение из логов по умолчанию
+++    let amount = '170'; // Текущий баланс на бирже
+++
+++    if (lastLLMLog.rows.length > 0) {
+++      try {
+++        const response = lastLLMLog.rows[0].response_payload_json;
+++        console.log('📝 Найден последний успешный лог LLM для XRP');
+++
+++        // Ищем упоминание о позиции в justification
+++        const justification = response.decisions?.[0]?.justification || '';
+++        const priceMatch = justification.match(/средней цене ([\d.]+)/);
+++        const amountMatch = justification.match(/объемом ([\d.]+) единиц/);
+++
+++        if (priceMatch) {
+++          entryPrice = priceMatch[1];
+++          console.log(`📊 Извлечена средняя цена входа: ${entryPrice}`);
+++        }
+++
+++        if (amountMatch) {
+++          amount = amountMatch[1];
+++          console.log(`📊 Извлечено количество: ${amount}`);
+++        }
+++      } catch (error) {
+++        console.log('⚠️  Не удалось извлечь данные из лога LLM, использую значения по умолчанию');
+++      }
+++    }
+++
+++    // Создаем позицию в БД
+++    const insertQuery = `
+++      INSERT INTO activepositions (
+++        pair, side, amount, average_entry_price, total_fee_cost, created_at
+++      ) VALUES ($1, $2, $3, $4, $5, NOW())
+++      ON CONFLICT (pair) DO UPDATE SET
+++        side = EXCLUDED.side,
+++        amount = EXCLUDED.amount,
+++        average_entry_price = EXCLUDED.average_entry_price,
+++        total_fee_cost = EXCLUDED.total_fee_cost
+++    `;
+++
+++    await pool.query(insertQuery, [
+++      'XRP/USDT',
+++      'long', // Предполагаем long позицию
+++      amount,
+++      entryPrice,
+++      '0.00000000', // Без комиссий
+++    ]);
+++
+++    console.log(`✅ Позиция XRP/USDT восстановлена:`);
+++    console.log(`   - Количество: ${amount}`);
+++    console.log(`   - Средняя цена входа: ${entryPrice}`);
+++    console.log(`   - Сторона: long`);
+++
+++    // Проверяем результат
+++    const result = await pool.query('SELECT * FROM activepositions WHERE pair = $1', ['XRP/USDT']);
+++
+++    if (result.rows.length > 0) {
+++      console.log('\n📋 Финальное состояние позиции:');
+++      console.log(result.rows[0]);
+++    }
+++  } catch (error) {
+++    console.error('❌ Ошибка при восстановлении позиции XRP:', error);
+++    process.exit(1);
+++  } finally {
+++    await pool.end();
+++  }
+++}
+++
+++restoreXRPPosition().catch((error) => {
+++  console.error('Fatal error:', error);
+++  process.exit(1);
+++});
++diff --git a/src/services/SyncEngineService.ts b/src/services/SyncEngineService.ts
++index 7b02e1b..71e2011 100644
++--- a/src/services/SyncEngineService.ts
+++++ b/src/services/SyncEngineService.ts
++@@ -127,12 +127,12 @@ export class SyncEngineService {
++         await new Promise((resolve) => setTimeout(resolve, 500));
++       }
++       try {
++-        // Таймаут 30 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
+++        // Таймаут 60 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
++         const reconcilePromise = this.reconcileStateForPair(pair);
++         const timeoutPromise = new Promise<void>((_, reject) => {
++           setTimeout(() => {
++-            reject(new Error(`Таймаут сверки для пары ${pair} (30 секунд)`));
++-          }, 30000); // 30 секунд на пару
+++            reject(new Error(`Таймаут сверки для пары ${pair} (60 секунд)`));
+++          }, 60000); // 60 секунд на пару
++         });
++ 
++         await Promise.race([reconcilePromise, timeoutPromise]);
++@@ -140,7 +140,7 @@ export class SyncEngineService {
++         const errorMessage = error instanceof Error ? error.message : String(error);
++         if (errorMessage.includes('Таймаут')) {
++           this.logger.warn(
++-            `[${pair}] Сверка для пары превысила таймаут (30 секунд). Возможно, очередь занята другой операцией. Продолжаем со следующей парой...`,
+++            `[${pair}] Сверка для пары превысила таймаут (60 секунд). Возможно, очередь занята другой операцией. Продолжаем со следующей парой...`,
++           );
++         } else {
++           this.logger.error(`[${pair}] Ошибка при сверке пары:`, error);
++-- 
++2.49.0
++
+-- 
+2.49.0
+

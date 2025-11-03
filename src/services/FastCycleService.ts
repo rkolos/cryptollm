@@ -85,10 +85,14 @@ export class FastCycleService {
   public start(): void {
     this.isStopping = false;
     this.logger.info('(FastCycle) Запуск...');
+    this.logger.info('(FastCycle) Начинаем инициализацию WebSocket...');
+
     // Запускаем вечный цикл в фоновом режиме (без await)
     this._runWebSocketLoop().catch((error) => {
       this.logger.error('(FastCycle) Фатальная ошибка в _runWebSocketLoop:', error);
     });
+
+    this.logger.info('(FastCycle) WebSocket цикл запущен');
   }
 
   /**

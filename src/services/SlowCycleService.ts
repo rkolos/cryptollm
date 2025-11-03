@@ -526,9 +526,24 @@ export class SlowCycleService {
               }
             }
 
-            // Если триггер сработал, запускаем оркестрацию и прерываем цикл для этой пары
+            // Если триггер сработал, обновляем время последнего срабатывания и запускаем оркестрацию
             if (triggerHit) {
-              this.logger.info(`(SlowCycle) [${pair}] Триггер сработал! Запуск оркестрации LLM запроса...`);
+              this.logger.info(
+                `(SlowCycle) [${pair}] Триггер сработал! Обновляю время последнего срабатывания и запускаю оркестрацию...`,
+              );
+
+              // Обновляем updated_at для триггера, чтобы сбросить таймер
+              try {
+                await this.databaseService.query('UPDATE llm_triggers SET updated_at = NOW() WHERE pair = $1', [pair]);
+                this.logger.debug(`(SlowCycle) [${pair}] Время последнего срабатывания обновлено`);
+              } catch (updateError) {
+                this.logger.error(
+                  `(SlowCycle) [${pair}] Ошибка при обновлении времени срабатывания триггера:`,
+                  updateError,
+                );
+                // Продолжаем выполнение, так как это не критично
+              }
+
               this.orchestrator.executeOrchestration(
                 pair,
                 `SlowCycle Trigger: ${condition.type} (${condition.name || 'timeout'})`,

@@ -141,10 +141,7 @@ export class FastCycleService {
    */
   private async _calculateTotalProfit(): Promise<DecimalValue | null> {
     try {
-      // Обновляем состояние аккаунта для получения актуальных данных
-      await this.accountState.refreshNow();
-
-      // Получаем обновленное состояние аккаунта
+      // Получаем состояние аккаунта (уже обновленное в вызывающем методе)
       const accountState = this.accountState.getAccountState();
       const openPositions = accountState.open_positions;
 
@@ -373,6 +370,15 @@ export class FastCycleService {
     }
 
     try {
+      // Обновляем состояние аккаунта перед проверкой
+      await this.accountState.refreshNow();
+      const accountState = this.accountState.getAccountState();
+
+      // Если нет открытых позиций, не считаем прибыль и не закрываем
+      if (accountState.open_positions.length === 0) {
+        return;
+      }
+
       const totalProfit = await this._calculateTotalProfit();
 
       if (totalProfit === null) {

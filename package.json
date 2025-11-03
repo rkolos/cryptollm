@@ -36,6 +36,7 @@
     "force-trigger-all": "tsx ./scripts/force-trigger-all.ts",
     "trigger-immediate": "tsx ./scripts/create-immediate-triggers.ts",
     "debug-triggers": "tsx ./scripts/debug-triggers.ts",
+    "report-triggers": "tsx ./scripts/report-triggers.ts",
     "clear-db": "tsx ./scripts/clear-database.ts",
     "mcp:postgres": "tsx ./scripts/start-mcp-postgres.ts",
     "mcp:postgres:server": "tsx ./scripts/mcp-postgres-server.ts"

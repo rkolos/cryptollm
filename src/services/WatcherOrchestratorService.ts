@@ -289,6 +289,9 @@ export class WatcherOrchestratorService {
               let reasonToSave = llmResponse.next_call_triggers.reason;
               let isFallbackTrigger = false;
 
+              // Распределяем timeout триггеры для предотвращения одновременного срабатывания
+              triggerConditionsToSave = this._distributeTriggerTimeouts(triggerConditionsToSave, pair);
+
               // Проверка: если модель не установила триггеры (пустой массив), создаем fallback
               if (!triggerConditionsToSave || triggerConditionsToSave.length === 0) {
                 const defaultTimeoutMinutes = this.configService.getDefaultTriggerTimeoutMinutes();
@@ -701,5 +704,48 @@ export class WatcherOrchestratorService {
           this.notificationService.sendAlert(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА PairActorManager: ${String(error)}`, false);
         }
       });
+  }
+
+  /**
+   * Распределяет timeout значения триггеров для предотвращения одновременного срабатывания
+   * Добавляет случайную задержку 0-59 минут к каждому timeout триггеру
+   */
+  private _distributeTriggerTimeouts(conditions: unknown[], pair: string): unknown[] {
+    if (!conditions || conditions.length === 0) {
+      return conditions;
+    }
+
+    // Находим все timeout триггеры
+    const timeoutTriggers = conditions.filter((c: unknown) => {
+      const condition = c as { type: string };
+      return condition.type === 'timeout';
+    });
+
+    if (timeoutTriggers.length === 0) {
+      return conditions;
+    }
+
+    // Создаем копию условий для модификации
+    const modifiedConditions = [...conditions];
+
+    // Для каждого timeout триггера добавляем случайную задержку
+    for (let i = 0; i < modifiedConditions.length; i++) {
+      const condition = modifiedConditions[i] as { type: string; condition: string; value: number };
+      if (condition.type === 'timeout' && condition.condition === 'minutes_passed') {
+        const originalValue = condition.value || 120; // По умолчанию 120 минут
+        // Добавляем случайную задержку 0-59 минут
+        const randomDelay = Math.floor(Math.random() * 60);
+        const newValue = originalValue + randomDelay;
+
+        modifiedConditions[i] = {
+          ...condition,
+          value: newValue
+        };
+
+        this.logger.debug(`[${pair}] Распределение timeout триггера: ${originalValue} → ${newValue} мин (задержка +${randomDelay} мин)`);
+      }
+    }
+
+    return modifiedConditions;
   }
 }

@@ -804,10 +804,6 @@ export class NotificationService {
   ): string {
     const lines: string[] = [];
 
-    // Заголовок
-    lines.push(`*🔔 ТРИГГЕРЫ ОБНОВЛЕНЫ:*`);
-    lines.push('');
-
     // Пара
     const pairEscaped = this._escapeMarkdown(pair);
     lines.push(`*Пара:* ${pairEscaped}`);
@@ -820,65 +816,6 @@ export class NotificationService {
     const updatedAtStr = updatedAt.toLocaleString('ru-RU');
     const updatedAtEscaped = this._escapeMarkdown(updatedAtStr);
     lines.push(`*Обновлено:* ${updatedAtEscaped}`);
-    lines.push('');
-
-    // Условия триггеров
-    lines.push(`*Условия триггеров \\(${triggerConditions.length}\\):*`);
-    for (let i = 0; i < triggerConditions.length; i++) {
-      const condition = triggerConditions[i];
-      if (!condition) {
-        continue;
-      }
-
-      const type = this._escapeMarkdown(condition.type);
-      const conditionStr = condition.condition ? this._escapeMarkdown(condition.condition) : '';
-
-      let displayValue = condition.value.toString();
-      if (condition.type === 'timeout' && condition.condition === 'minutes_passed') {
-        // Для timeout триггеров показываем минуты и время до срабатывания
-        const updatedAtTime = updatedAt.getTime();
-        const minutesPassed = Math.floor((Date.now() - updatedAtTime) / 60000);
-        const requiredMinutes = condition.value;
-        const remainingMinutes = requiredMinutes - minutesPassed;
-        if (remainingMinutes <= 0) {
-          displayValue = `${condition.value} минут (ПРОСРОЧЕН на ${Math.abs(remainingMinutes)} мин)`;
-        } else {
-          displayValue = `${condition.value} минут (осталось ${remainingMinutes} мин до срабатывания)`;
-        }
-      } else if (condition.type === 'price') {
-        // Для price триггеров показываем цену
-        displayValue = condition.value.toString();
-      } else if (condition.type === 'indicator') {
-        // Для indicator триггеров показываем значение индикатора
-        displayValue = condition.value.toString();
-      }
-
-      const valueEscaped = this._escapeMarkdown(displayValue);
-      lines.push(`  ${i + 1}\\. *Тип:* ${type}`);
-
-      if (conditionStr) {
-        lines.push(`     *Условие:* ${conditionStr}`);
-      }
-
-      if (condition.name) {
-        const nameEscaped = this._escapeMarkdown(condition.name);
-        lines.push(`     *Индикатор:* ${nameEscaped}`);
-      }
-
-      if (condition.timeframe) {
-        const timeframeEscaped = this._escapeMarkdown(condition.timeframe);
-        lines.push(`     *Таймфрейм:* ${timeframeEscaped}`);
-      }
-
-      lines.push(`     *Значение:* \`${valueEscaped}\``);
-      lines.push('');
-    }
-
-    // Запрошенные данные
-    if (requestedData && requestedData.length > 0) {
-      const requestedDataEscaped = requestedData.map((item) => this._escapeMarkdown(item)).join(', ');
-      lines.push(`*Запрошенные данные:* ${requestedDataEscaped}`);
-    }
 
     return lines.join('\n');
   }

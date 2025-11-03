@@ -1,0 +1,50 @@
+From cbd9bfba5aa356835b58fab1b53ee2bfe0096e57 Mon Sep 17 00:00:00 2001
+From: Roman Kolos <kolos.roman@gmail.com>
+Date: Mon, 3 Nov 2025 06:22:31 +0200
+Subject: [PATCH] fix: improve API reliability - add delays between sync
+ requests and increase retry attempts for network errors
+
+---
+ src/services/ProductionExchangeService.ts | 4 ++--
+ src/services/SyncEngineService.ts         | 4 ++++
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/services/ProductionExchangeService.ts b/src/services/ProductionExchangeService.ts
+index 561fcda..a582e8b 100644
+--- a/src/services/ProductionExchangeService.ts
++++ b/src/services/ProductionExchangeService.ts
+@@ -98,14 +98,14 @@ export class ProductionExchangeService implements IExchangeService {
+     }
+   }
+ 
+-  private async execute<T>(fn: () => Promise<T>, maxRetries: number = 3): Promise<T> {
++  private async execute<T>(fn: () => Promise<T>, maxRetries: number = 5): Promise<T> {
+     // Для testnet: синхронизируем время один раз при первом запросе
+     if (this.appMode === 'testnet' && !this.timeSyncDone) {
+       await this._syncTimeOnce();
+     }
+ 
+     let lastError: unknown;
+-    const retryDelayMs = 1000; // Пауза между попытками: 1 секунда
++    const retryDelayMs = 2000; // Пауза между попытками: 2 секунды
+ 
+     for (let attempt = 0; attempt < maxRetries; attempt++) {
+       try {
+diff --git a/src/services/SyncEngineService.ts b/src/services/SyncEngineService.ts
+index a6aec93..7b02e1b 100644
+--- a/src/services/SyncEngineService.ts
++++ b/src/services/SyncEngineService.ts
+@@ -122,6 +122,10 @@ export class SyncEngineService {
+     // чтобы распределить нагрузку на API биржи во времени.
+     // Добавляем таймаут для каждой пары, чтобы зависание одной пары не блокировало остальные
+     for (const pair of watchlist) {
++      // Добавляем задержку между парами, чтобы не перегружать API (500ms между парами)
++      if (watchlist.indexOf(pair) > 0) {
++        await new Promise((resolve) => setTimeout(resolve, 500));
++      }
+       try {
+         // Таймаут 30 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
+         const reconcilePromise = this.reconcileStateForPair(pair);
+-- 
+2.49.0
+

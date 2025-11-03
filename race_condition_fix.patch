@@ -1,0 +1,146 @@
+From 23a0b670b6ddb0a70f739ec259a3dadcdbaffd9e Mon Sep 17 00:00:00 2001
+From: Roman Kolos <kolos.roman@gmail.com>
+Date: Mon, 3 Nov 2025 09:04:11 +0200
+Subject: [PATCH] fix: prevent race conditions in account state and trigger
+ reading
+
+---
+ src/services/AccountStateService.ts        | 62 +++++++++++++++++++---
+ src/services/SlowCycleService.ts           | 30 ++++++++++-
+ src/services/WatcherOrchestratorService.ts |  6 ++-
+ 3 files changed, 86 insertions(+), 12 deletions(-)
+
+diff --git a/src/services/AccountStateService.ts b/src/services/AccountStateService.ts
+index 59030b4..6f78ce3 100644
+--- a/src/services/AccountStateService.ts
++++ b/src/services/AccountStateService.ts
+@@ -136,14 +136,60 @@ export class AccountStateService {
+       try {
+         this.logger.debug('Refreshing account state...');
+ 
+-        // Параллельный запрос данных из всех источников
+-        const [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult, dbLlmTriggersResult] = await Promise.all([
+-          this.exchangeService.fetchBalance(),
+-          this.databaseService.query('SELECT * FROM ActivePositions'),
+-          this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
+-          this.databaseService.query('SELECT * FROM TSL_State'),
+-          this.databaseService.query('SELECT * FROM llm_triggers'),
+-        ]);
++        // Параллельный запрос данных из всех источников с retry для защиты от race condition
++        const maxRetries = 2;
++        let balance: any;
++        let dbPositionsResult: any;
++        let dbOrdersResult: any;
++        let dbTslStateResult: any;
++        let dbLlmTriggersResult: any;
++
++        for (let attempt = 0; attempt < maxRetries; attempt++) {
++          try {
++            [balance, dbPositionsResult, dbOrdersResult, dbTslStateResult, dbLlmTriggersResult] = await Promise.all([
++              this.exchangeService.fetchBalance(),
++              this.databaseService.query('SELECT * FROM ActivePositions'),
++              this.databaseService.query('SELECT * FROM ActiveOrders WHERE status = $1', ['open']),
++              this.databaseService.query('SELECT * FROM TSL_State'),
++              this.databaseService.query('SELECT * FROM llm_triggers'),
++            ]);
++
++            // Базовая валидация консистентности данных
++            const positions = dbPositionsResult?.rows || [];
++            const orders = dbOrdersResult?.rows || [];
++            const tslStates = dbTslStateResult?.rows || [];
++            const triggers = dbLlmTriggersResult?.rows || [];
++
++            // Проверяем, что все данные получены
++            if (!Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(tslStates) || !Array.isArray(triggers)) {
++              throw new Error('Invalid data types received from database');
++            }
++
++            // Проверяем соответствие позиций и ордеров
++            const positionPairs = new Set(positions.map((p: any) => p.pair));
++            const orderPairs = new Set(orders.map((o: any) => o.pair));
++            const tslPairs = new Set(tslStates.map((t: any) => t.pair));
++
++            // Если есть несоответствия, логируем предупреждение
++            for (const pair of positionPairs) {
++              if (!orderPairs.has(pair) && !tslPairs.has(pair)) {
++                this.logger.debug(`[AccountState] Позиция ${pair} существует без связанных ордеров/TSL - возможно, это нормально`);
++              }
++            }
++
++            break; // Данные корректны
++
++          } catch (error) {
++            this.logger.warn(`AccountState refresh attempt ${attempt + 1}/${maxRetries} failed:`, error);
++            if (attempt === maxRetries - 1) throw error;
++            await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
++          }
++        }
++
++        // Проверяем, что данные получены (защита от undefined)
++        if (!balance || !dbPositionsResult || !dbOrdersResult || !dbTslStateResult || !dbLlmTriggersResult) {
++          throw new Error('Failed to fetch account data after retries');
++        }
+ 
+         // Парсинг баланса
+         const quoteCurrency = 'USDT'; // Для V1 используем фиксированный USDT
+diff --git a/src/services/SlowCycleService.ts b/src/services/SlowCycleService.ts
+index a4e167b..6360472 100644
+--- a/src/services/SlowCycleService.ts
++++ b/src/services/SlowCycleService.ts
+@@ -375,8 +375,34 @@ export class SlowCycleService {
+   private async _checkTriggers(): Promise<void> {
+     try {
+       this.logger.info('(SlowCycle) Начало проверки триггеров...');
+-      const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
+-      const allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
++
++      // Добавляем retry логику для защиты от race condition
++      let allTriggers: DbTrigger[] = [];
++      const maxRetries = 3;
++
++      for (let attempt = 0; attempt < maxRetries; attempt++) {
++        try {
++          const allTriggersResult = await this.databaseService.query('SELECT * FROM llm_triggers');
++          allTriggers = allTriggersResult.rows as unknown[] as DbTrigger[];
++
++          // Проверяем консистентность данных (базовая валидация)
++          const invalidTriggers = allTriggers.filter(trigger =>
++            !trigger.pair || !trigger.trigger_conditions_json
++          );
++
++          if (invalidTriggers.length > 0) {
++            this.logger.warn(`(SlowCycle) Найдены некорректные записи триггеров (${invalidTriggers.length}). Повторная попытка ${attempt + 1}/${maxRetries}...`);
++            await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1))); // Задержка перед retry
++            continue;
++          }
++
++          break; // Данные корректны, выходим из цикла retry
++        } catch (error) {
++          this.logger.warn(`(SlowCycle) Ошибка при чтении триггеров, попытка ${attempt + 1}/${maxRetries}:`, error);
++          if (attempt === maxRetries - 1) throw error;
++          await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
++        }
++      }
+ 
+       this.logger.info(`(SlowCycle) Проверка триггеров: найдено ${allTriggers.length} записей в llm_triggers`);
+ 
+diff --git a/src/services/WatcherOrchestratorService.ts b/src/services/WatcherOrchestratorService.ts
+index 10e43d6..db97986 100644
+--- a/src/services/WatcherOrchestratorService.ts
++++ b/src/services/WatcherOrchestratorService.ts
+@@ -506,8 +506,10 @@ export class WatcherOrchestratorService {
+                       false,
+                     );
+ 
+-                    // Обновляем кэш AccountStateService, чтобы удалить триггеры из памяти
+-                    await this.accountStateService.refreshNow();
++                    // Обновляем кэш AccountStateService асинхронно (fire-and-forget), чтобы избежать race condition
++                    this.accountStateService.refreshNow().catch((error) => {
++                      this.logger.error(`[${pair}] Ошибка при асинхронном обновлении AccountState:`, error);
++                    });
+ 
+                     // Получаем актуальное состояние счета для формирования детального описания проблемы
+                     const currentAccountState = this.accountStateService.getAccountState();
+-- 
+2.49.0
+

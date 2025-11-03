@@ -107,10 +107,7 @@ export class ExchangeRulesService {
   /**
    * Загружает правила для конкретной пары (для использования в скриптах восстановления)
    */
-  public static async loadRulesForPair(
-    pair: string,
-    exchangeService: IExchangeService,
-  ): Promise<IMarketRules | null> {
+  public static async loadRulesForPair(pair: string, exchangeService: IExchangeService): Promise<IMarketRules | null> {
     await exchangeService.loadMarkets();
     const rawMarkets = exchangeService.getRawMarkets();
     const market = rawMarkets[pair] as Record<string, unknown> | undefined;

@@ -1,0 +1,49 @@
+From c34cea76b63be4238cc5b3ff9f9527ea2c6f82b3 Mon Sep 17 00:00:00 2001
+From: Roman Kolos <kolos.roman@gmail.com>
+Date: Mon, 3 Nov 2025 08:55:13 +0200
+Subject: [PATCH] fix: prevent deadlock in WatcherOrchestratorService by making
+ post-sync async
+
+---
+ src/services/WatcherOrchestratorService.ts | 24 ++++++++++++++--------
+ 1 file changed, 15 insertions(+), 9 deletions(-)
+
+diff --git a/src/services/WatcherOrchestratorService.ts b/src/services/WatcherOrchestratorService.ts
+index d59f154..10e43d6 100644
+--- a/src/services/WatcherOrchestratorService.ts
++++ b/src/services/WatcherOrchestratorService.ts
+@@ -648,16 +648,22 @@ export class WatcherOrchestratorService {
+             }
+           }
+ 
+-          // Шаг 6: Пост-Сверка (критично - только если есть решения)
++          // Шаг 6: Пост-Сверка (асинхронно - fire-and-forget, чтобы избежать deadlock)
+           if (llmResponse.decisions.length > 0) {
+-            this.logger.info(`[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации...`);
+-            try {
+-              await this.syncEngine.reconcileStateForPair(pair);
+-              this.logger.info(`[${pair}] Пост-синхронизация завершена успешно.`);
+-            } catch (error) {
+-              this.logger.error(`[${pair}] Ошибка при пост-синхронизации:`, error);
+-              // Не прерываем выполнение, так как это не критическая ошибка
+-            }
++            this.logger.info(
++              `[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации (асинхронно)...`,
++            );
++
++            // АСИНХРОННЫЙ ВЫЗОВ: не ждем завершения, чтобы избежать deadlock с pairActorManager
++            this.syncEngine
++              .reconcileStateForPair(pair)
++              .then(() => {
++                this.logger.info(`[${pair}] Пост-синхронизация завершена успешно.`);
++              })
++              .catch((error) => {
++                this.logger.error(`[${pair}] Ошибка при пост-синхронизации:`, error);
++                // Не критичная ошибка - просто логируем
++              });
+           } else {
+             this.logger.debug(`[${pair}] Нет решений для исполнения. Пост-синхронизация не требуется.`);
+           }
+-- 
+2.49.0
+

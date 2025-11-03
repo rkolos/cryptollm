@@ -353,10 +353,10 @@ export class WorkerService {
           decision.justification || 'Обоснование не предоставлено',
         );
       } else {
-        // Для других действий отправляем обычное уведомление с обоснованием
+        // Для других действий отправляем обычное уведомление без обоснования
         this.notificationService.sendAlert(
-          `[${pair}] ИСПОЛНЕНО: ${decision.action}\n\n🤖 Обоснование LLM:\n${decision.justification || 'Обоснование не предоставлено'}`,
-          true, // Включить AccountState
+          `[${pair}] ИСПОЛНЕНО: ${decision.action}`,
+          false, // Не включать AccountState
         );
       }
     } catch (executionError) {

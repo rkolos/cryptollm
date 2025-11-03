@@ -51,7 +51,7 @@ async function recoverTriggers() {
     // Инициализация Exchange и LLM сервисов
     const exchangeService = new ProductionExchangeService();
     const llmService = new ProductionLLMService();
-    
+
     // Определяем пары для восстановления (если не указаны, используем все из БД)
     let targetPairs: string[] = [];
     if (pairsToRecover.length > 0) {
@@ -60,11 +60,11 @@ async function recoverTriggers() {
       const triggersResult = await databaseService.query('SELECT pair FROM LLM_Triggers ORDER BY pair');
       targetPairs = triggersResult.rows.map((row: { pair: string }) => row.pair);
     }
-    
+
     // Загружаем правила только для нужных пар
     logger.info('Загрузка правил биржи для восстанавливаемых пар...');
     ExchangeRulesService.instance = ExchangeRulesService.instance || new ExchangeRulesService();
-    
+
     for (const pair of targetPairs) {
       const rules = await ExchangeRulesService.loadRulesForPair(pair, exchangeService);
       if (rules) {
@@ -87,7 +87,7 @@ async function recoverTriggers() {
     notificationService.injectDatabaseService(databaseService);
     notificationService.injectExchangeService(exchangeService);
     notificationService.injectExchangeRulesService(ExchangeRulesService.getInstance());
-    
+
     const taEngineService = TAEngineService.getInstance();
     const marketDataService = MarketDataService.getInstance(exchangeService);
     const watchlistOverviewService = WatchlistOverviewService.getInstance(
@@ -98,7 +98,7 @@ async function recoverTriggers() {
     );
     const macroContextService = MacroContextService.getInstance();
     await macroContextService.initialize(); // Первая загрузка данных
-    
+
     const assemblerService = LLMRequestAssemblerService.getInstance(
       configService,
       databaseService,
@@ -108,15 +108,15 @@ async function recoverTriggers() {
       accountStateService,
       macroContextService,
     );
-    
+
     // Инициализация LLMRequestAssemblerService (загрузка промптов)
     logger.info('Загрузка промптов LLM...');
     await assemblerService.initialize();
     logger.info('Промпты LLM загружены успешно.');
-    
+
     const guaranteedOrderService = GuaranteedOrderExecutionService.getInstance();
     guaranteedOrderService.initialize(exchangeService);
-    
+
     const validatorService = ValidatorService.getInstance(ExchangeRulesService.getInstance());
     const workerService = WorkerService.getInstance(
       validatorService,
@@ -222,4 +222,3 @@ recoverTriggers().catch((error) => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
-

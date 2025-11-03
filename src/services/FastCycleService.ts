@@ -380,6 +380,11 @@ export class FastCycleService {
 
         this.logger.info(`Все позиции закрыты. Целевая прибыль зафиксирована: ${profitDecimal.toFixed(2)} USDT`);
 
+        // Очищаем базу данных от информации об открытых сделках и пересоздаем триггеры
+        await this._cleanupDatabaseAfterCloseAll();
+
+        this.logger.info('База данных очищена и триггеры пересозданы с таймаутами');
+
         // Отправляем уведомление в Telegram
         const message = `🎯 **АВТОМАТИЧЕСКОЕ ЗАКРЫТИЕ ВСЕХ ПОЗИЦИЙ**\n\n💰 *Общая прибыль зафиксирована:* ${profitDecimal.toFixed(2)} USDT\n\n📊 Все открытые позиции были закрыты по текущим рыночным ценам для фиксации прибыли.\n\n*Причина:* Достигнут порог прибыли > 10 USD`;
 
@@ -390,6 +395,86 @@ export class FastCycleService {
     } finally {
       // Снимаем флаг блокировки
       this.isClosingAllPositions = false;
+    }
+  }
+
+  /**
+   * Очищает базу данных после закрытия всех позиций и пересоздает триггеры с таймаутами
+   */
+  private async _cleanupDatabaseAfterCloseAll(): Promise<void> {
+    try {
+      this.logger.info('Очищаем базу данных от информации об открытых сделках...');
+
+      // Импортируем необходимые модули
+      const { Pool } = await import('pg');
+      const { ConfigService } = await import('./ConfigService.js');
+
+      // Создаем отдельное подключение к БД для очистки
+      const pool = new Pool({
+        host: process.env.DB_HOST || 'localhost',
+        port: parseInt(process.env.DB_PORT || '5432'),
+        user: process.env.DB_USER || 'cryptollm',
+        password: process.env.DB_PASSWORD || 'cryptollm',
+        database: process.env.DB_NAME || 'cryptollm',
+      });
+
+      try {
+        this.logger.info('Очищаем таблицы ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log...');
+
+        // Очищаем все таблицы и сбрасываем счетчики SERIAL
+        await pool.query(
+          'TRUNCATE ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log RESTART IDENTITY CASCADE',
+        );
+
+        this.logger.info('Все таблицы очищены, счетчики ID сброшены');
+
+        // Создаем начальные триггеры для всех пар из watchlist
+        this.logger.info('Создаем начальные триггеры с таймаутами...');
+        const config = ConfigService.getInstance();
+        const watchlist = config.getWatchlist();
+
+        this.logger.info(`Пары для инициализации: ${watchlist.join(', ')}`);
+
+        for (let i = 0; i < watchlist.length; i++) {
+          const pair = watchlist[i];
+          // Создаем триггеры с задержкой 1 минута между парами
+          // Первая пара сработает через 1 минуту, вторая через 2 минуты и т.д.
+          const initialTimeout = Date.now() + (i + 1) * 60000; // (i + 1) минут от текущего времени
+
+          const triggerConditions = [
+            {
+              type: 'timeout' as const,
+              value: initialTimeout,
+            },
+          ];
+
+          try {
+            await pool.query(
+              `INSERT INTO LLM_Triggers (pair, reason, trigger_conditions_json, requested_data_json, updated_at)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (pair) DO UPDATE SET
+                 reason = EXCLUDED.reason,
+                 trigger_conditions_json = EXCLUDED.trigger_conditions_json,
+                 requested_data_json = EXCLUDED.requested_data_json,
+                 updated_at = EXCLUDED.updated_at`,
+              [pair, 'Auto close all positions - trigger reset after profit taking', JSON.stringify(triggerConditions), null, new Date()],
+            );
+
+            const triggerTime = new Date(initialTimeout).toLocaleTimeString();
+            this.logger.info(`${pair}: триггер на ${triggerTime} (через ${i + 1} мин.)`);
+          } catch (error) {
+            this.logger.error(`Ошибка при создании триггера для ${pair}:`, error);
+            throw error;
+          }
+        }
+
+        this.logger.info('Триггеры пересозданы с таймаутами');
+      } finally {
+        await pool.end();
+      }
+    } catch (error) {
+      this.logger.error('Ошибка при очистке базы данных:', error);
+      throw error;
     }
   }
 

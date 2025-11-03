@@ -2,6 +2,7 @@ import { LoggingService } from './LoggingService.js';
 import { ConfigService } from './ConfigService.js';
 import { GlobalStateService } from './GlobalStateService.js';
 import { AccountStateService } from './AccountStateService.js';
+import { NotificationService } from './NotificationService.js';
 import type { IExchangeService, IDecimalTicker } from '../interfaces/IExchangeService.js';
 import type { DecimalValue } from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
@@ -30,6 +31,7 @@ export class FastCycleService {
   private readonly configService: ConfigService;
   private readonly globalState: GlobalStateService;
   private readonly accountState: AccountStateService;
+  private readonly notificationService: NotificationService;
   private readonly exchangeService: IExchangeService;
   private readonly tslHandler: ITSLHandlerService;
   private readonly priceTriggerHandler: IPriceTriggerHandler;
@@ -51,6 +53,7 @@ export class FastCycleService {
     this.exchangeService = exchangeService;
     this.tslHandler = tslHandler;
     this.priceTriggerHandler = priceTriggerHandler;
+    this.notificationService = NotificationService.getInstance(configService);
     this.logger = LoggingService.getInstance().getLogger('FastCycle');
     this.logger.info('FastCycleService initialized.');
   }
@@ -351,6 +354,11 @@ export class FastCycleService {
         await this._closeAllPositions();
 
         this.logger.info(`Все позиции закрыты. Целевая прибыль зафиксирована: ${profitDecimal.toFixed(2)} USDT`);
+
+        // Отправляем уведомление в Telegram
+        const message = `🎯 **АВТОМАТИЧЕСКОЕ ЗАКРЫТИЕ ВСЕХ ПОЗИЦИЙ**\n\n💰 *Общая прибыль зафиксирована:* ${profitDecimal.toFixed(2)} USDT\n\n📊 Все открытые позиции были закрыты по текущим рыночным ценам для фиксации прибыли.\n\n*Причина:* Достигнут порог прибыли > 10 USD`;
+
+        this.notificationService.sendAlert(message, true); // true для включения состояния аккаунта
       }
     } catch (error) {
       this.logger.error('Ошибка при проверке и закрытии позиций:', error);

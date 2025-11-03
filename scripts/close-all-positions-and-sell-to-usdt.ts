@@ -174,13 +174,8 @@ async function closeAllPositionsAndSellToUSDT() {
   // Получаем config instance
   const config = ConfigService.getInstance();
 
-  // Определяем exchange service в зависимости от режима
-  let exchangeService: IExchangeService;
-  if (config.getAppMode() === 'production') {
-    exchangeService = ProductionExchangeService.getInstance();
-  } else {
-    exchangeService = MockExchangeService.getInstance();
-  }
+  // Для скрипта перезагрузки всегда используем ProductionExchangeService
+  const exchangeService = ProductionExchangeService.getInstance();
 
   // Загружаем рынки для ExchangeRulesService
   await exchangeService.loadMarkets();

@@ -38,6 +38,8 @@ export class FastCycleService {
 
   private isStopping: boolean = false;
   private isClosingAllPositions: boolean = false; // Защита от множественных одновременных закрытий
+  private lastProfitCheck: number = 0; // Timestamp последней проверки прибыли
+  private isCheckingProfit: boolean = false; // Защита от множественных одновременных проверок прибыли
 
   private constructor(
     configService: ConfigService,
@@ -398,9 +400,11 @@ export class FastCycleService {
    */
   private async _checkAndClosePositionsIfProfitable(): Promise<void> {
     // Защита от множественных одновременных вызовов
-    if (this.isClosingAllPositions) {
+    if (this.isClosingAllPositions || this.isCheckingProfit) {
       return;
     }
+
+    this.isCheckingProfit = true;
 
     try {
       // Обновляем состояние аккаунта перед проверкой
@@ -446,6 +450,7 @@ export class FastCycleService {
       this.logger.error('Ошибка при проверке и закрытии позиций:', error);
     } finally {
       // Снимаем флаг блокировки
+      this.isCheckingProfit = false;
       this.isClosingAllPositions = false;
     }
   }
@@ -555,10 +560,15 @@ export class FastCycleService {
       // (Задача 5.5) Делегирование Price Triggers (без await)
       this.priceTriggerHandler.handleTicker(ticker);
 
-      // Расчет общей прибыли и автоматическое закрытие позиций (fire-and-forget)
-      this._checkAndClosePositionsIfProfitable().catch((error) => {
-        this.logger.error(`(FastCycle) [${ticker.symbol}] Ошибка при проверке прибыли: ${String(error)}`);
-      });
+      // Расчет общей прибыли и автоматическое закрытие позиций (не чаще чем раз в 30 секунд)
+      const now = Date.now();
+      if (now - this.lastProfitCheck > 30000 && !this.isCheckingProfit) {
+        // 30 секунд и проверка не выполняется
+        this.lastProfitCheck = now;
+        this._checkAndClosePositionsIfProfitable().catch((error) => {
+          this.logger.error(`(FastCycle) [${ticker.symbol}] Ошибка при проверке прибыли: ${String(error)}`);
+        });
+      }
     } catch (error) {
       this.logger.error(`(FastCycle) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ обработчика "тика": ${String(error)}`, error);
       // Не бросаем ошибку, чтобы не "убить" WS-цикл

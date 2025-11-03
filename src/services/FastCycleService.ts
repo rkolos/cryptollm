@@ -40,6 +40,11 @@ export class FastCycleService {
   private isClosingAllPositions: boolean = false; // Защита от множественных одновременных закрытий
   private lastProfitCheck: number = 0; // Timestamp последней проверки прибыли
   private isCheckingProfit: boolean = false; // Защита от множественных одновременных проверок прибыли
+  private lastTickerTime: number = 0; // Timestamp последнего полученного тикера
+  private tickerCount: number = 0; // Счетчик тикеров для логирования
+  private isMonitoringStarted: boolean = false; // Флаг запуска мониторинга
+  private profitCheckStartTime: number = 0; // Timestamp начала проверки прибыли
+  private profitCheckTimer: NodeJS.Timeout | null = null; // Таймер для независимой проверки прибыли
 
   private constructor(
     configService: ConfigService,
@@ -94,6 +99,9 @@ export class FastCycleService {
       this.logger.error('(FastCycle) Фатальная ошибка в _runWebSocketLoop:', error);
     });
 
+    // Запускаем независимый таймер для проверки прибыли (на случай если тикеры перестанут приходить)
+    this._startProfitCheckTimer();
+
     this.logger.info('(FastCycle) WebSocket цикл запущен');
   }
 
@@ -103,6 +111,13 @@ export class FastCycleService {
   public async stop(): Promise<void> {
     this.logger.warn('(FastCycle) Остановка...');
     this.isStopping = true;
+
+    // Останавливаем таймер проверки прибыли
+    if (this.profitCheckTimer) {
+      clearInterval(this.profitCheckTimer);
+      this.profitCheckTimer = null;
+    }
+
     await this.exchangeService.close();
     this.logger.info('(FastCycle) Остановлен.');
   }
@@ -113,22 +128,41 @@ export class FastCycleService {
   private async _runWebSocketLoop(): Promise<void> {
     const watchlist = this.configService.getWatchlist();
     const reconnectDelayMs = 5000; // 5 секунд
+    let loopIteration = 0;
 
     while (!this.isStopping) {
+      loopIteration++;
       try {
-        this.logger.info(`(FastCycle) Подключение к watchTickers для ${watchlist.length} пар...`);
+        this.logger.info(
+          `(FastCycle) Подключение к watchTickers для ${watchlist.length} пар... (итерация цикла: ${loopIteration})`,
+        );
+
+        // Запускаем мониторинг тикеров в фоне только один раз
+        if (!this.isMonitoringStarted) {
+          this.isMonitoringStarted = true;
+          this._startTickerMonitoring().catch((error) => {
+            this.logger.error('(FastCycle) Ошибка в мониторинге тикеров:', error);
+          });
+        }
 
         // watchTickers возвращает Promise<void>, который завершается при закрытии соединения
         // Оборачиваем синхронный _handleTickerData в async функцию для соответствия интерфейсу
+        const watchStartTime = Date.now();
+        this.logger.info(`(FastCycle) Вызов watchTickers... (итерация: ${loopIteration})`);
+
         await this.exchangeService.watchTickers(watchlist, async (ticker) => {
           this._handleTickerData(ticker);
         });
 
-        // Если мы здесь, значит ccxt "отвалился" штатно (без ошибки)
-        this.logger.info('(FastCycle) watchTickers завершился штатно. Переподключение...');
+        // Если мы здесь, значит watchTickers завершился (штатно или с ошибкой)
+        const watchDuration = Date.now() - watchStartTime;
+        this.logger.warn(
+          `(FastCycle) watchTickers завершился после ${Math.round(watchDuration / 1000)} сек. Переподключение... (итерация: ${loopIteration})`,
+        );
       } catch (error) {
         this.logger.error(
-          `(FastCycle) Ошибка watchTickers: ${String(error)}. Переподключение через ${reconnectDelayMs} мс...`,
+          `(FastCycle) Ошибка watchTickers: ${String(error)}. Переподключение через ${reconnectDelayMs} мс... (итерация: ${loopIteration})`,
+          error,
         );
 
         // Если это не остановка, ждем перед переподключением
@@ -220,10 +254,6 @@ export class FastCycleService {
           // Продолжаем с другими позициями
         }
       }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const totalProfitNum = (totalProfit as any).toNumber();
-      this.logger.info(`Общая прибыль портфеля: ${totalProfitNum.toFixed(4)} USDT (${openPositions.length} позиций)`);
 
       return totalProfit;
     } catch (error) {
@@ -400,11 +430,21 @@ export class FastCycleService {
    */
   private async _checkAndClosePositionsIfProfitable(): Promise<void> {
     // Защита от множественных одновременных вызовов
-    if (this.isClosingAllPositions || this.isCheckingProfit) {
+    // Флаг должен быть уже установлен в _handleTickerData или в таймере
+    if (!this.isCheckingProfit) {
+      // Если флаг не установлен, значит вызов произошел нестандартным путем
+      // Устанавливаем флаг здесь для безопасности
+      this.isCheckingProfit = true;
+    }
+
+    if (this.isClosingAllPositions) {
+      this.logger.debug('(FastCycle) Проверка прибыли пропущена: закрываются позиции');
+      this.isCheckingProfit = false;
       return;
     }
 
-    this.isCheckingProfit = true;
+    this.profitCheckStartTime = Date.now();
+    this.logger.info('(FastCycle) Начало проверки прибыли позиций...');
 
     try {
       // Обновляем состояние аккаунта перед проверкой
@@ -413,17 +453,28 @@ export class FastCycleService {
 
       // Если нет открытых позиций, не считаем прибыль и не закрываем
       if (accountState.open_positions.length === 0) {
+        this.isCheckingProfit = false;
+        this.profitCheckStartTime = 0;
         return;
       }
 
       const totalProfit = await this._calculateTotalProfit();
 
       if (totalProfit === null) {
+        this.isCheckingProfit = false;
+        this.profitCheckStartTime = 0;
         return; // Не удалось рассчитать прибыль
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const profitDecimal = totalProfit as any;
+
+      // Логируем прибыль один раз за проверку
+      const profitNum = profitDecimal.toNumber();
+      this.logger.info(
+        `[FastCycle] Общая прибыль портфеля: ${profitNum.toFixed(4)} USDT (${accountState.open_positions.length} позиций)`,
+      );
+
       const minProfitThreshold = new DecimalConstructor(10); // 10 долларов
 
       if (profitDecimal.gte(minProfitThreshold)) {
@@ -450,8 +501,11 @@ export class FastCycleService {
       this.logger.error('Ошибка при проверке и закрытии позиций:', error);
     } finally {
       // Снимаем флаг блокировки
+      const checkDuration = Date.now() - this.profitCheckStartTime;
+      this.logger.info(`(FastCycle) Проверка прибыли завершена за ${Math.round(checkDuration / 1000)} сек`);
       this.isCheckingProfit = false;
       this.isClosingAllPositions = false;
+      this.profitCheckStartTime = 0;
     }
   }
 
@@ -548,6 +602,18 @@ export class FastCycleService {
    * КРИТИЧНО: Метод НЕ async и НЕ содержит await
    */
   private _handleTickerData(ticker: IDecimalTicker): void {
+    // Обновляем время последнего тикера
+    const now = Date.now();
+    this.lastTickerTime = now;
+    this.tickerCount++;
+
+    // Логируем получение тикеров каждые 100 тикеров (чтобы не засорять логи)
+    if (this.tickerCount % 100 === 0) {
+      this.logger.debug(
+        `(FastCycle) Получено ${this.tickerCount} тикеров. Последний: ${ticker.symbol} @ ${ticker.last}`,
+      );
+    }
+
     // Проверка состояния (критично)
     if (this.globalState.getIsPaused() || this.globalState.getIsShuttingDown() || this.isStopping) {
       return;
@@ -561,18 +627,132 @@ export class FastCycleService {
       this.priceTriggerHandler.handleTicker(ticker);
 
       // Расчет общей прибыли и автоматическое закрытие позиций (не чаще чем раз в 30 секунд)
-      const now = Date.now();
       if (now - this.lastProfitCheck > 30000 && !this.isCheckingProfit) {
         // 30 секунд и проверка не выполняется
+        // Устанавливаем флаг ДО асинхронного вызова для защиты от race condition
+        this.isCheckingProfit = true;
         this.lastProfitCheck = now;
+        const timeSinceLastCheck = Math.round((now - this.lastProfitCheck) / 1000);
+        this.logger.info(`(FastCycle) Запуск проверки прибыли (прошло ${timeSinceLastCheck} сек с последней проверки)`);
         this._checkAndClosePositionsIfProfitable().catch((error) => {
-          this.logger.error(`(FastCycle) [${ticker.symbol}] Ошибка при проверке прибыли: ${String(error)}`);
+          this.logger.error(`(FastCycle) [${ticker.symbol}] Ошибка при проверке прибыли: ${String(error)}`, error);
         });
       }
     } catch (error) {
       this.logger.error(`(FastCycle) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ обработчика "тика": ${String(error)}`, error);
       // Не бросаем ошибку, чтобы не "убить" WS-цикл
     }
+  }
+
+  /**
+   * Мониторинг получения тикеров - проверяет, что тикеры продолжают приходить
+   */
+  private async _startTickerMonitoring(): Promise<void> {
+    const monitoringInterval = 60000; // Проверяем каждую минуту
+
+    while (!this.isStopping) {
+      await this._sleep(monitoringInterval);
+
+      const now = Date.now();
+      const timeSinceLastTicker = now - this.lastTickerTime;
+
+      if (this.lastTickerTime === 0) {
+        // Еще не было тикеров
+        this.logger.warn('(FastCycle) Мониторинг: тикеры еще не получены');
+      } else if (timeSinceLastTicker > 120000) {
+        // Нет тикеров более 2 минут - это проблема
+        this.logger.error(
+          `(FastCycle) КРИТИЧНО: Тикеры не поступают уже ${Math.round(timeSinceLastTicker / 1000)} секунд! Последний тикер был ${new Date(this.lastTickerTime).toISOString()}`,
+        );
+      } else if (timeSinceLastTicker > 60000) {
+        // Нет тикеров более 1 минуты - предупреждение
+        this.logger.warn(
+          `(FastCycle) ВНИМАНИЕ: Тикеры не поступают уже ${Math.round(timeSinceLastTicker / 1000)} секунд. Последний тикер был ${new Date(this.lastTickerTime).toISOString()}`,
+        );
+      } else {
+        // Все в порядке
+        this.logger.debug(
+          `(FastCycle) Мониторинг: OK. Получено ${this.tickerCount} тикеров. Последний тикер ${Math.round(timeSinceLastTicker / 1000)} сек назад`,
+        );
+      }
+
+      // Проверяем, не застряла ли проверка прибыли
+      if (this.isCheckingProfit && this.profitCheckStartTime > 0) {
+        const timeSinceCheckStarted = now - this.profitCheckStartTime;
+        if (timeSinceCheckStarted > 120000) {
+          // Проверка прибыли выполняется более 2 минут - это проблема
+          this.logger.error(
+            `(FastCycle) КРИТИЧНО: Проверка прибыли выполняется уже ${Math.round(timeSinceCheckStarted / 1000)} секунд! Возможно, застряла.`,
+          );
+        } else if (timeSinceCheckStarted > 60000) {
+          // Проверка прибыли выполняется более 1 минуты - предупреждение
+          this.logger.warn(
+            `(FastCycle) ВНИМАНИЕ: Проверка прибыли выполняется уже ${Math.round(timeSinceCheckStarted / 1000)} секунд (обычно должно быть < 10 сек)`,
+          );
+        }
+      } else {
+        // Проверяем, не пора ли запустить проверку прибыли принудительно
+        const timeSinceLastCheck = now - this.lastProfitCheck;
+        if (this.lastProfitCheck > 0 && timeSinceLastCheck > 90000) {
+          // Прошло более 90 секунд с последней проверки - предупреждение
+          this.logger.warn(
+            `(FastCycle) ВНИМАНИЕ: Прошло ${Math.round(timeSinceLastCheck / 1000)} секунд с последней проверки прибыли. Ожидается каждые 30 секунд.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Запускает независимый таймер для проверки прибыли каждые 30 секунд
+   * Это гарантирует проверку даже если тикеры перестанут приходить
+   */
+  private _startProfitCheckTimer(): void {
+    // Проверяем прибыль каждые 30 секунд независимо от тикеров
+    this.profitCheckTimer = setInterval(() => {
+      if (this.isStopping || this.globalState.getIsPaused() || this.globalState.getIsShuttingDown()) {
+        return;
+      }
+
+      // Проверяем, не выполняется ли уже проверка
+      if (this.isCheckingProfit) {
+        this.logger.debug('(FastCycle) Проверка прибыли пропущена (уже выполняется)');
+        return;
+      }
+
+      // Проверяем, есть ли открытые позиции
+      const accountState = this.accountState.getAccountState();
+      if (accountState.open_positions.length === 0) {
+        return; // Нет позиций, нечего проверять
+      }
+
+      // Проверяем, прошло ли достаточно времени с последней проверки
+      const now = Date.now();
+      const timeSinceLastCheck = now - this.lastProfitCheck;
+
+      if (timeSinceLastCheck >= 30000) {
+        // Устанавливаем флаг ДО асинхронного вызова для защиты от race condition
+        // Дополнительная проверка на случай, если флаг установился между проверками
+        if (this.isCheckingProfit) {
+          this.logger.debug('(FastCycle) [Таймер] Проверка прибыли пропущена: уже выполняется');
+          return;
+        }
+        this.isCheckingProfit = true;
+        this.lastProfitCheck = now;
+        this.logger.info(
+          `(FastCycle) [Таймер] Запуск проверки прибыли (прошло ${Math.round(timeSinceLastCheck / 1000)} сек с последней проверки)`,
+        );
+        this._checkAndClosePositionsIfProfitable().catch((error) => {
+          this.logger.error(`(FastCycle) [Таймер] Ошибка при проверке прибыли: ${String(error)}`, error);
+        });
+      } else {
+        this.logger.debug(
+          `(FastCycle) [Таймер] Проверка прибыли пропущена (прошло только ${Math.round(timeSinceLastCheck / 1000)} сек)`,
+        );
+      }
+    }, 30000); // Проверяем каждые 30 секунд
+
+    this.logger.info('(FastCycle) Независимый таймер проверки прибыли запущен (каждые 30 сек)');
   }
 
   /**

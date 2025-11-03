@@ -25,7 +25,7 @@ async function clearDatabase() {
 
     // Очищаем все таблицы и сбрасываем счетчики SERIAL
     await pool.query(
-      'TRUNCATE ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log RESTART IDENTITY CASCADE',
+      'TRUNCATE activepositions, activeorders, tsl_state, tradehistory, llm_triggers, llm_decision_log RESTART IDENTITY CASCADE',
     );
 
     logger.info('✅ Database cleared successfully!');

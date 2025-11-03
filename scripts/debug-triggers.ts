@@ -13,7 +13,9 @@ const pool = new Pool({
 
 async function debugTriggers() {
   try {
-    const result = await pool.query('SELECT pair, reason, trigger_conditions_json, updated_at FROM llm_triggers ORDER BY pair');
+    const result = await pool.query(
+      'SELECT pair, reason, trigger_conditions_json, updated_at FROM llm_triggers ORDER BY pair',
+    );
 
     console.log('🔍 Отладка триггеров:\n');
 
@@ -39,7 +41,9 @@ async function debugTriggers() {
             const triggerTime = condition.value;
             const timeLeft = triggerTime - now;
             console.log(`   ⏰ Timeout триггер: ${new Date(triggerTime).toISOString()}`);
-            console.log(`      Осталось: ${Math.round(timeLeft / 1000)} сек (${timeLeft > 0 ? 'будущий' : 'просрочен'})`);
+            console.log(
+              `      Осталось: ${Math.round(timeLeft / 1000)} сек (${timeLeft > 0 ? 'будущий' : 'просрочен'})`,
+            );
           }
         }
       } catch (e) {

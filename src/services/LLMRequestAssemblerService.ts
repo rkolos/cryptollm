@@ -693,8 +693,7 @@ export class LLMRequestAssemblerService {
 
     // Формирование strategy_context
     const strategyContextSerialized = {
-      role: strategyContext.role,
-      style: strategyContext.style,
+      ...strategyContext, // Копируем все поля из strategyContext (role, style, goal, etc.)
       risk_rules: {
         default_risk_per_trade_percent: riskRules.defaultRiskPercent,
         max_allowed_risk_per_trade_percent: riskRules.maxAllowedRiskPercent,

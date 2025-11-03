@@ -334,8 +334,37 @@ export class FastCycleService {
             exchangeRulesService.getRules(currentPosition.pair),
           );
 
+          // Создаем запись в LLM_Decision_Log для auto-close операции
+          const logResult = await databaseService.query(
+            `INSERT INTO LLM_Decision_Log (
+              timestamp, triggered_pair, trigger_reason,
+              request_payload_json, response_payload_json, decision_result
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id`,
+            [
+              new Date(),
+              currentPosition.pair,
+              'auto_close_profitable_position',
+              JSON.stringify({
+                action: 'auto_close',
+                position: currentPosition,
+                accountState: currentAccountState,
+              }),
+              JSON.stringify({
+                decision: closeDecision,
+                reason: 'Auto-close profitable position by FastCycle',
+              }),
+              'pending',
+            ],
+          );
+
+          if (!logResult.rows[0]) {
+            throw new Error(`Failed to create LLM_Decision_Log for auto-close ${currentPosition.pair}`);
+          }
+
+          const llmDecisionLogId = String(logResult.rows[0].id);
+
           // Выполняем закрытие через WorkerService
-          const llmDecisionLogId = `auto-close-${currentPosition.pair}-${Date.now()}`;
           await workerService.execute(
             closeDecision,
             llmDecisionLogId,
@@ -444,7 +473,7 @@ export class FastCycleService {
 
         // Очищаем все таблицы и сбрасываем счетчики SERIAL
         await pool.query(
-          'TRUNCATE ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log RESTART IDENTITY CASCADE',
+          'TRUNCATE activepositions, activeorders, tsl_state, tradehistory, llm_triggers, llm_decision_log RESTART IDENTITY CASCADE',
         );
 
         this.logger.info('Все таблицы очищены, счетчики ID сброшены');

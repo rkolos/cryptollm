@@ -18,6 +18,8 @@ const configSchema = z.object({
   TELEGRAM_CHAT_ID: z.string().optional(),
   STRATEGY_ROLE: z.string().min(1),
   STRATEGY_STYLE: z.string().min(1),
+  STRATEGY_CONTEXT: z.string().optional(),
+  RISK_RULES: z.string().optional(),
   RISK_DEFAULT_PERCENT: z.coerce.number().positive(),
   RISK_MAX_PER_TRADE_PERCENT: z.coerce.number().positive(),
   RISK_MAX_TOTAL_PORTFOLIO_PERCENT: z.coerce.number().positive(),
@@ -117,6 +119,17 @@ export class ConfigService {
       };
     }
 
+    // Если задана STRATEGY_CONTEXT как JSON, используем её
+    if (this.config.STRATEGY_CONTEXT) {
+      try {
+        const strategyContext = JSON.parse(this.config.STRATEGY_CONTEXT);
+        return strategyContext;
+      } catch (error) {
+        console.warn('Failed to parse STRATEGY_CONTEXT JSON, falling back to legacy format:', error);
+      }
+    }
+
+    // Fallback к legacy формату
     return {
       role: this.config.STRATEGY_ROLE,
       style: this.config.STRATEGY_STYLE,
@@ -135,6 +148,21 @@ export class ConfigService {
         maxTotalPortfolioRiskPercent: 100.0, // Можно рисковать всем портфелем
         desiredRiskRewardRatio: 1.0, // Даже 1:1 приемлемо для агрессивной торговли
       };
+    }
+
+    // Если задана RISK_RULES как JSON, используем её
+    if (this.config.RISK_RULES) {
+      try {
+        const riskRules = JSON.parse(this.config.RISK_RULES);
+        return {
+          defaultRiskPercent: riskRules.default_risk_per_trade_percent,
+          maxAllowedRiskPercent: riskRules.max_allowed_risk_per_trade_percent,
+          maxTotalPortfolioRiskPercent: riskRules.max_total_portfolio_risk_percent,
+          desiredRiskRewardRatio: riskRules.desired_risk_reward_ratio,
+        };
+      } catch (error) {
+        console.warn('Failed to parse RISK_RULES JSON, falling back to legacy format:', error);
+      }
     }
 
     // Для production используем значения из конфигурации

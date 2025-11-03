@@ -68,32 +68,18 @@ async function reportTriggers() {
         pairsWithTriggers++;
         activeTriggers++;
 
-        // Форматируем условия триггера
+        // Показываем полную информацию о триггере
         const conditions = Array.isArray(trigger.conditions) ? trigger.conditions : [trigger.conditions];
-        const conditionsText = conditions
-          .map((cond: { type: string; value: number; condition?: string; indicator?: string }) => {
-            if (cond.type === 'timeout') {
-              const timeoutDate = new Date(cond.value);
-              const now = new Date();
-              const timeLeft = timeoutDate.getTime() - now.getTime();
-              const minutesLeft = Math.max(0, Math.floor(timeLeft / (1000 * 60)));
+        console.log(`   📋 Полные условия триггера:`);
 
-              return `⏰ Timeout до ${timeoutDate.toLocaleString('ru-RU')} (${minutesLeft} мин осталось)`;
-            } else if (cond.type === 'price') {
-              return `💰 Price ${cond.condition} ${cond.value}`;
-            } else if (cond.type === 'indicator') {
-              return `📊 ${cond.indicator} ${cond.condition} ${cond.value}`;
-            } else {
-              return `${cond.type}: ${JSON.stringify(cond)}`;
-            }
-          })
-          .join(', ');
+        conditions.forEach((cond: unknown, index: number) => {
+          console.log(`     ${index + 1}. ${JSON.stringify(cond, null, 2)}`);
+        });
 
         const updatedAt = new Date(trigger.updated_at).toLocaleString('ru-RU');
 
         console.log(`✅ ${pair}`);
         console.log(`   📅 Обновлено: ${updatedAt}`);
-        console.log(`   🎯 Условия: ${conditionsText}`);
         console.log(`   📝 Причина: ${trigger.reason}`);
         console.log('');
       } else {

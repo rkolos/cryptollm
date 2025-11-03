@@ -141,7 +141,10 @@ export class FastCycleService {
    */
   private async _calculateTotalProfit(): Promise<DecimalValue | null> {
     try {
-      // Получаем состояние аккаунта
+      // Обновляем состояние аккаунта для получения актуальных данных
+      await this.accountState.refreshNow();
+
+      // Получаем обновленное состояние аккаунта
       const accountState = this.accountState.getAccountState();
       const openPositions = accountState.open_positions;
 
@@ -274,12 +277,22 @@ export class FastCycleService {
       // Закрываем каждую позицию, проверяя актуальность перед каждым закрытием
       for (const originalPosition of openPositions) {
         try {
-          // Проверяем, существует ли позиция еще (могла быть закрыта TSL или другой логикой)
+          // Проверяем, существует ли позиция еще в БД (могла быть закрыта TSL или другой логикой)
+          const positionResult = await databaseService.query(`SELECT pair FROM ActivePositions WHERE pair = $1`, [
+            originalPosition.pair,
+          ]);
+
+          if (!positionResult.rowCount || positionResult.rowCount === 0) {
+            this.logger.info(`Позиция ${originalPosition.pair} уже закрыта (не найдена в БД), пропускаем`);
+            continue;
+          }
+
+          // Дополнительная проверка в accountState для консистентности
           const currentAccountState = this.accountState.getAccountState();
           const currentPosition = currentAccountState.open_positions.find((p) => p.pair === originalPosition.pair);
 
           if (!currentPosition) {
-            this.logger.info(`Позиция ${originalPosition.pair} уже закрыта, пропускаем`);
+            this.logger.info(`Позиция ${originalPosition.pair} уже закрыта (не найдена в accountState), пропускаем`);
             continue;
           }
 
@@ -419,7 +432,9 @@ export class FastCycleService {
       });
 
       try {
-        this.logger.info('Очищаем таблицы ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log...');
+        this.logger.info(
+          'Очищаем таблицы ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log...',
+        );
 
         // Очищаем все таблицы и сбрасываем счетчики SERIAL
         await pool.query(
@@ -457,7 +472,13 @@ export class FastCycleService {
                  trigger_conditions_json = EXCLUDED.trigger_conditions_json,
                  requested_data_json = EXCLUDED.requested_data_json,
                  updated_at = EXCLUDED.updated_at`,
-              [pair, 'Auto close all positions - trigger reset after profit taking', JSON.stringify(triggerConditions), null, new Date()],
+              [
+                pair,
+                'Auto close all positions - trigger reset after profit taking',
+                JSON.stringify(triggerConditions),
+                null,
+                new Date(),
+              ],
             );
 
             const triggerTime = new Date(initialTimeout).toLocaleTimeString();

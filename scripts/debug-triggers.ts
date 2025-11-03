@@ -23,7 +23,13 @@ async function debugTriggers() {
       console.log(`   Обновлено: ${row.updated_at}`);
 
       try {
-        const conditions = JSON.parse(row.trigger_conditions_json);
+        let conditions;
+        if (typeof row.trigger_conditions_json === 'string') {
+          conditions = JSON.parse(row.trigger_conditions_json);
+        } else {
+          // PostgreSQL JSONB возвращается как объект
+          conditions = row.trigger_conditions_json;
+        }
         console.log(`   Условия: ${JSON.stringify(conditions, null, 2)}`);
 
         // Проверяем timeout триггеры

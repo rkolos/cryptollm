@@ -175,7 +175,7 @@ async function closeAllPositionsAndSellToUSDT() {
   const config = ConfigService.getInstance();
 
   // Для скрипта перезагрузки всегда используем ProductionExchangeService
-  const exchangeService = ProductionExchangeService.getInstance();
+  const exchangeService = new ProductionExchangeService();
 
   // Загружаем рынки для ExchangeRulesService
   await exchangeService.loadMarkets();

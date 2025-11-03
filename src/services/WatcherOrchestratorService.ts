@@ -729,14 +729,16 @@ export class WatcherOrchestratorService {
     // Создаем копию условий для модификации
     const modifiedConditions = [...conditions];
 
-    // Для каждого timeout триггера добавляем случайную задержку
+    // Для каждого timeout триггера устанавливаем фиксированное значение 12 часов (720 минут) и добавляем случайную задержку
     for (let i = 0; i < modifiedConditions.length; i++) {
       const condition = modifiedConditions[i] as LLMTriggerCondition;
       if (condition.type === 'timeout' && condition.condition === 'minutes_passed') {
-        const originalValue = condition.value ?? 120; // По умолчанию 120 минут
+        const originalValue = condition.value ?? 120; // Исходное значение от модели
+        // Всегда устанавливаем 12 часов (720 минут) независимо от значения модели
+        const fixedValue = 720; // 12 часов в минутах
         // Добавляем случайную задержку 0-59 минут
         const randomDelay = Math.floor(Math.random() * 60);
-        const newValue = originalValue + randomDelay;
+        const newValue = fixedValue + randomDelay;
 
         modifiedConditions[i] = {
           type: condition.type,
@@ -747,7 +749,7 @@ export class WatcherOrchestratorService {
         };
 
         this.logger.debug(
-          `[${pair}] Распределение timeout триггера: ${originalValue} → ${newValue} мин (задержка +${randomDelay} мин)`,
+          `[${pair}] Timeout триггер установлен на 12 часов (модель: ${originalValue} → ${newValue} мин, задержка +${randomDelay} мин)`,
         );
       }
     }

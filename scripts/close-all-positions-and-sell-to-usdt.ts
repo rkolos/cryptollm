@@ -171,6 +171,9 @@ async function closeAllPositionsAndSellToUSDT() {
   LoggingService.initialize();
   const logger = LoggingService.getInstance().getLogger('CloseAll');
 
+  // Получаем config instance
+  const config = ConfigService.getInstance();
+
   // Определяем exchange service в зависимости от режима
   let exchangeService: IExchangeService;
   if (config.getAppMode() === 'production') {

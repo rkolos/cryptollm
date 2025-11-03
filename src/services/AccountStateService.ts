@@ -3,7 +3,8 @@ import { ConfigService } from './ConfigService.js';
 import { DatabaseService } from './DatabaseService.js';
 import { EventBusService, type TradeExecutedEvent } from './EventBusService.js';
 import { LoggingService } from './LoggingService.js';
-import type { IExchangeService } from '../interfaces/IExchangeService.js';
+import type { IExchangeService, IDecimalBalance } from '../interfaces/IExchangeService.js';
+import type { QueryResult } from 'pg';
 import type {
   AccountState,
   OpenPosition,
@@ -138,11 +139,11 @@ export class AccountStateService {
 
         // Параллельный запрос данных из всех источников с retry для защиты от race condition
         const maxRetries = 2;
-        let balance: any;
-        let dbPositionsResult: any;
-        let dbOrdersResult: any;
-        let dbTslStateResult: any;
-        let dbLlmTriggersResult: any;
+        let balance: IDecimalBalance | undefined;
+        let dbPositionsResult: QueryResult | undefined;
+        let dbOrdersResult: QueryResult | undefined;
+        let dbTslStateResult: QueryResult | undefined;
+        let dbLlmTriggersResult: QueryResult | undefined;
 
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           try {
@@ -161,28 +162,34 @@ export class AccountStateService {
             const triggers = dbLlmTriggersResult?.rows || [];
 
             // Проверяем, что все данные получены
-            if (!Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(tslStates) || !Array.isArray(triggers)) {
+            if (
+              !Array.isArray(positions) ||
+              !Array.isArray(orders) ||
+              !Array.isArray(tslStates) ||
+              !Array.isArray(triggers)
+            ) {
               throw new Error('Invalid data types received from database');
             }
 
             // Проверяем соответствие позиций и ордеров
-            const positionPairs = new Set(positions.map((p: any) => p.pair));
-            const orderPairs = new Set(orders.map((o: any) => o.pair));
-            const tslPairs = new Set(tslStates.map((t: any) => t.pair));
+            const positionPairs = new Set(positions.map((p) => p.pair));
+            const orderPairs = new Set(orders.map((o) => o.pair));
+            const tslPairs = new Set(tslStates.map((t) => t.pair));
 
             // Если есть несоответствия, логируем предупреждение
             for (const pair of positionPairs) {
               if (!orderPairs.has(pair) && !tslPairs.has(pair)) {
-                this.logger.debug(`[AccountState] Позиция ${pair} существует без связанных ордеров/TSL - возможно, это нормально`);
+                this.logger.debug(
+                  `[AccountState] Позиция ${pair} существует без связанных ордеров/TSL - возможно, это нормально`,
+                );
               }
             }
 
             break; // Данные корректны
-
           } catch (error) {
             this.logger.warn(`AccountState refresh attempt ${attempt + 1}/${maxRetries} failed:`, error);
             if (attempt === maxRetries - 1) throw error;
-            await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
+            await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
           }
         }
 
@@ -191,10 +198,17 @@ export class AccountStateService {
           throw new Error('Failed to fetch account data after retries');
         }
 
+        // Теперь мы уверены, что переменные определены
+        const balanceData = balance;
+        const positionsResult = dbPositionsResult;
+        const ordersResult = dbOrdersResult;
+        const tslStateResult = dbTslStateResult;
+        const llmTriggersResult = dbLlmTriggersResult;
+
         // Парсинг баланса
         const quoteCurrency = 'USDT'; // Для V1 используем фиксированный USDT
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const quoteBalance = balance[quoteCurrency] as any;
+        const quoteBalance = balanceData[quoteCurrency] as any;
         const availableQuoteBalance = quoteBalance
           ? this.toDecimal(quoteBalance.free)
           : (new DecimalConstructor(0) as DecimalValue);
@@ -205,7 +219,7 @@ export class AccountStateService {
 
         // Формирование массива assets (только активы с total > 0, исключая quoteCurrency)
         const assets: AssetBalance[] = [];
-        for (const [currency, funds] of Object.entries(balance)) {
+        for (const [currency, funds] of Object.entries(balanceData)) {
           if (
             currency === quoteCurrency ||
             currency === 'info' ||
@@ -233,8 +247,7 @@ export class AccountStateService {
 
         // Парсинг позиций из БД
         const openPositions: OpenPosition[] = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const positionsRows = dbPositionsResult.rows as any[];
+        const positionsRows = positionsResult.rows;
         for (const row of positionsRows) {
           const dbPos = row as DbPosition;
           openPositions.push({
@@ -247,8 +260,7 @@ export class AccountStateService {
         }
 
         // Парсинг ордеров из БД
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ordersRows = dbOrdersResult.rows as any[];
+        const ordersRows = ordersResult.rows;
         const openOrders = ordersRows.map((row) => {
           const dbOrder = row as DbOrder;
           return {
@@ -267,8 +279,7 @@ export class AccountStateService {
 
         // Парсинг TSL_State из БД
         const tslRulesMap = new Map<string, TSLRule>();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const tslRows = dbTslStateResult.rows as any[];
+        const tslRows = tslStateResult.rows;
         for (const row of tslRows) {
           const pair = row.pair as string;
           // Находим соответствующую позицию
@@ -307,8 +318,7 @@ export class AccountStateService {
 
         // Парсинг LLM_Triggers из БД
         const llmTriggersMap = new Map<string, LLMTriggerCondition[]>();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const llmTriggersRows = dbLlmTriggersResult.rows as any[];
+        const llmTriggersRows = llmTriggersResult.rows;
         for (const row of llmTriggersRows) {
           const pair = row.pair as string;
           let triggerConditions: LLMTriggerCondition[] = [];

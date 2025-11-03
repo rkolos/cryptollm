@@ -196,7 +196,8 @@ async function closeAllPositionsAndSellToUSDT() {
 
   const validatorService = ValidatorService.getInstance(config, accountStateService, exchangeRulesService);
 
-  const executionService = GuaranteedOrderExecutionService.getInstance(exchangeService);
+  const executionService = GuaranteedOrderExecutionService.getInstance();
+  executionService.initialize(exchangeService);
 
   const workerService = WorkerService.getInstance(
     validatorService,

@@ -171,15 +171,6 @@ async function closeAllPositionsAndSellToUSDT() {
   LoggingService.initialize();
   const logger = LoggingService.getInstance().getLogger('CloseAll');
 
-  // Инициализируем DatabaseService
-  await DatabaseService.initialize();
-  const databaseService = DatabaseService.getInstance();
-  const eventBus = EventBusService.getInstance();
-  // Используем stub вместо NotificationService для простоты
-  const notificationServiceStub = new NotificationServiceStub();
-  const globalStateService = GlobalStateService.getInstance();
-  const exchangeRulesService = ExchangeRulesService.getInstance();
-
   // Определяем exchange service в зависимости от режима
   let exchangeService: IExchangeService;
   if (config.getAppMode() === 'production') {
@@ -187,6 +178,21 @@ async function closeAllPositionsAndSellToUSDT() {
   } else {
     exchangeService = MockExchangeService.getInstance();
   }
+
+  // Загружаем рынки для ExchangeRulesService
+  await exchangeService.loadMarkets();
+
+  // Инициализируем ExchangeRulesService
+  await ExchangeRulesService.initialize(exchangeService, config);
+  const exchangeRulesService = ExchangeRulesService.getInstance();
+
+  // Инициализируем DatabaseService
+  await DatabaseService.initialize();
+  const databaseService = DatabaseService.getInstance();
+  const eventBus = EventBusService.getInstance();
+  // Используем stub вместо NotificationService для простоты
+  const notificationServiceStub = new NotificationServiceStub();
+  const globalStateService = GlobalStateService.getInstance();
 
   const accountStateService = AccountStateService.getInstance(config, exchangeService, databaseService, eventBus);
 
@@ -207,8 +213,7 @@ async function closeAllPositionsAndSellToUSDT() {
   );
 
   try {
-    // Загружаем рынки
-    await exchangeService.loadMarkets();
+    // Рынки уже загружены выше для ExchangeRulesService
     logger.info('Рынки загружены успешно');
 
     // Получаем актуальное состояние аккаунта

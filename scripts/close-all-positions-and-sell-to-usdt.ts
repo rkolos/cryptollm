@@ -22,6 +22,16 @@ import Decimal from 'decimal.js';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const DecimalConstructor = Decimal as any;
 
+// Простой stub для NotificationService, чтобы избежать зависимостей
+class NotificationServiceStub {
+  sendTradingSummary(): void {
+    // stub - ничего не делаем
+  }
+  sendAlert(): void {
+    // stub - ничего не делаем
+  }
+}
+
 config();
 
 async function clearLogs(): Promise<void> {
@@ -165,7 +175,8 @@ async function closeAllPositionsAndSellToUSDT() {
   await DatabaseService.initialize();
   const databaseService = DatabaseService.getInstance();
   const eventBus = EventBusService.getInstance();
-  const notificationService = NotificationService.getInstance();
+  // Используем stub вместо NotificationService для простоты
+  const notificationServiceStub = new NotificationServiceStub();
   const globalStateService = GlobalStateService.getInstance();
   const exchangeRulesService = ExchangeRulesService.getInstance();
 
@@ -188,7 +199,7 @@ async function closeAllPositionsAndSellToUSDT() {
     executionService,
     databaseService,
     eventBus,
-    notificationService,
+    notificationServiceStub as any, // используем stub
     globalStateService,
     accountStateService,
     exchangeRulesService,

@@ -34,6 +34,7 @@
     "check-available-pairs": "tsx ./scripts/check-available-pairs.ts",
     "recover-triggers": "tsx ./scripts/recover-triggers.ts",
     "force-trigger-all": "tsx ./scripts/force-trigger-all.ts",
+    "trigger-immediate": "tsx ./scripts/create-immediate-triggers.ts",
     "clear-db": "tsx ./scripts/clear-database.ts",
     "mcp:postgres": "tsx ./scripts/start-mcp-postgres.ts",
     "mcp:postgres:server": "tsx ./scripts/mcp-postgres-server.ts"

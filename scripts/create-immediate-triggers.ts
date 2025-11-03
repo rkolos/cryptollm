@@ -19,8 +19,8 @@ async function createImmediateTriggers() {
 
   for (let i = 0; i < watchlist.length; i++) {
     const pair = watchlist[i];
-    // Создаем триггер с задержкой 10 секунд + 2 секунды на каждую пару (чтобы не все сработали одновременно)
-    const immediateTimeout = Date.now() + 10000 + (i * 2000); // 10 сек + 2 сек на пару
+    // Создаем триггер с задержкой 30 секунд + 5 секунд на каждую пару (чтобы не все сработали одновременно)
+    const immediateTimeout = Date.now() + 30000 + (i * 5000); // 30 сек + 5 сек на пару
 
     const triggerConditions = [
       {
@@ -49,7 +49,7 @@ async function createImmediateTriggers() {
   }
 
   await pool.end();
-  console.log('\n🎯 Немедленные триггеры созданы! LLM запросы начнутся через 10-30 секунд.');
+  console.log('\n🎯 Немедленные триггеры созданы! LLM запросы начнутся через 30 секунд - 2 минуты.');
 }
 
 createImmediateTriggers().catch(console.error);

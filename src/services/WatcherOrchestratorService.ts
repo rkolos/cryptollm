@@ -9,7 +9,7 @@ import { MarketDataService } from './MarketDataService.js';
 import { GlobalStateService } from './GlobalStateService.js';
 import Decimal from 'decimal.js';
 import type { ILLMService } from '../interfaces/ILLMService.js';
-import type { LLMDecision, LLMResponse } from '../interfaces/ILLMTypes.js';
+import type { LLMDecision, LLMResponse, LLMTriggerCondition } from '../interfaces/ILLMTypes.js';
 import type { AccountState, StrategyContext, MarketData } from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
 
@@ -509,10 +509,14 @@ export class WatcherOrchestratorService {
                       false,
                     );
 
-                    // Обновляем кэш AccountStateService асинхронно (fire-and-forget), чтобы избежать race condition
-                    this.accountStateService.refreshNow().catch((error) => {
-                      this.logger.error(`[${pair}] Ошибка при асинхронном обновлении AccountState:`, error);
-                    });
+                    // Обновляем кэш AccountStateService синхронно внутри мьютекса для избежания race condition
+                    try {
+                      await this.accountStateService.refreshNow();
+                      this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после отклонения валидатором`);
+                    } catch (error) {
+                      this.logger.error(`[${pair}] Ошибка при обновлении AccountState:`, error);
+                      // Не критичная ошибка - продолжаем выполнение
+                    }
 
                     // Получаем актуальное состояние счета для формирования детального описания проблемы
                     const currentAccountState = this.accountStateService.getAccountState();
@@ -710,16 +714,13 @@ export class WatcherOrchestratorService {
    * Распределяет timeout значения триггеров для предотвращения одновременного срабатывания
    * Добавляет случайную задержку 0-59 минут к каждому timeout триггеру
    */
-  private _distributeTriggerTimeouts(conditions: unknown[], pair: string): unknown[] {
+  private _distributeTriggerTimeouts(conditions: LLMTriggerCondition[], pair: string): LLMTriggerCondition[] {
     if (!conditions || conditions.length === 0) {
       return conditions;
     }
 
     // Находим все timeout триггеры
-    const timeoutTriggers = conditions.filter((c: unknown) => {
-      const condition = c as { type: string };
-      return condition.type === 'timeout';
-    });
+    const timeoutTriggers = conditions.filter((c) => c.type === 'timeout');
 
     if (timeoutTriggers.length === 0) {
       return conditions;
@@ -730,16 +731,19 @@ export class WatcherOrchestratorService {
 
     // Для каждого timeout триггера добавляем случайную задержку
     for (let i = 0; i < modifiedConditions.length; i++) {
-      const condition = modifiedConditions[i] as { type: string; condition: string; value: number };
+      const condition = modifiedConditions[i] as LLMTriggerCondition;
       if (condition.type === 'timeout' && condition.condition === 'minutes_passed') {
-        const originalValue = condition.value || 120; // По умолчанию 120 минут
+        const originalValue = condition.value ?? 120; // По умолчанию 120 минут
         // Добавляем случайную задержку 0-59 минут
         const randomDelay = Math.floor(Math.random() * 60);
         const newValue = originalValue + randomDelay;
 
         modifiedConditions[i] = {
-          ...condition,
-          value: newValue
+          type: condition.type,
+          condition: condition.condition,
+          value: newValue,
+          name: condition.name,
+          timeframe: condition.timeframe
         };
 
         this.logger.debug(`[${pair}] Распределение timeout триггера: ${originalValue} → ${newValue} мин (задержка +${randomDelay} мин)`);

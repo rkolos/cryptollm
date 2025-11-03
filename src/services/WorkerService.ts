@@ -310,18 +310,50 @@ export class WorkerService {
         case 'OPEN_LONG':
         case 'OPEN_SHORT':
           await this.handleOpenPosition(decision, validationResult!);
+          // Обновляем кэш AccountStateService после открытия позиции
+          try {
+            await this.accountStateService.refreshNow();
+            this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после открытия позиции`);
+          } catch (error) {
+            this.logger.error(`[${pair}] Ошибка при обновлении кэша после открытия позиции:`, error);
+            // Не критичная ошибка - продолжаем выполнение
+          }
           break;
 
         case 'CLOSE_POSITION':
           await this.handleClosePosition(decision, validationResult!);
+          // Обновляем кэш AccountStateService после закрытия позиции
+          try {
+            await this.accountStateService.refreshNow();
+            this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после закрытия позиции`);
+          } catch (error) {
+            this.logger.error(`[${pair}] Ошибка при обновлении кэша после закрытия позиции:`, error);
+            // Не критичная ошибка - продолжаем выполнение
+          }
           break;
 
         case 'MODIFY_POSITION':
           await this.handleModifyPosition(decision, validationResult!);
+          // Обновляем кэш AccountStateService после модификации позиции
+          try {
+            await this.accountStateService.refreshNow();
+            this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после модификации позиции`);
+          } catch (error) {
+            this.logger.error(`[${pair}] Ошибка при обновлении кэша после модификации позиции:`, error);
+            // Не критичная ошибка - продолжаем выполнение
+          }
           break;
 
         case 'CANCEL_ORDERS':
           await this.handleCancelOrders(decision, validationResult!);
+          // Обновляем кэш AccountStateService после отмены ордеров
+          try {
+            await this.accountStateService.refreshNow();
+            this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после отмены ордеров`);
+          } catch (error) {
+            this.logger.error(`[${pair}] Ошибка при обновлении кэша после отмены ордеров:`, error);
+            // Не критичная ошибка - продолжаем выполнение
+          }
           break;
 
         case 'HOLD':
@@ -493,11 +525,6 @@ export class WorkerService {
     const entryPriceDecimal = new DecimalConstructor(realEntryPrice.toString());
     const amountDecimal = new DecimalConstructor(realAmount.toString());
     const feeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
-
-    // ОБНОВЛЯЕМ баланс после создания market ордера
-    // Добавляем небольшую задержку для гарантии обновления баланса на бирже
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await this.accountStateService.refreshNow();
 
     // --- Шаг 2: Создание SL/TP ордеров ДО транзакции БД ---
     let slOrder: IDecimalOrder | null = null;

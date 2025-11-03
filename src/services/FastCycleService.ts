@@ -315,6 +315,15 @@ export class FastCycleService {
             watchlist: this.configService.getWatchlist(),
           };
 
+          // Валидируем decision
+          validatorService.validateDecision(
+            closeDecision,
+            currentAccountState,
+            strategyContext,
+            currentMarketData,
+            exchangeRulesService.getRules(currentPosition.pair),
+          );
+
           // Выполняем закрытие через WorkerService
           const llmDecisionLogId = `auto-close-${currentPosition.pair}-${Date.now()}`;
           await workerService.execute(

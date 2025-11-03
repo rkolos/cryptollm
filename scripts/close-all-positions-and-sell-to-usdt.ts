@@ -392,7 +392,7 @@ async function closeAllPositionsAndSellToUSDT() {
   } finally {
     // Закрываем соединения
     await exchangeService.close();
-    await databaseService.close();
+    await databaseService.closePool();
   }
 }
 

@@ -470,16 +470,14 @@ export class ProductionExchangeService implements IExchangeService {
 
     // Основной цикл подключения и переподключения
     while (!GlobalStateService.getInstance().getIsShuttingDown()) {
-      // Проверяем состояние перед подключением
-      if (GlobalStateService.getInstance().getIsShuttingDown()) {
-        break;
-      }
-
       try {
         // Проверяем, не превышен ли лимит попыток переподключения
         if (this.wsReconnectAttempts >= this.maxReconnectAttempts) {
-          this.logger.error(`Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping watchTickers.`);
-          break;
+          const error = new Error(
+            `Max reconnection attempts (${this.maxReconnectAttempts}) reached. WebSocket connection failed.`,
+          );
+          this.logger.error(error.message);
+          throw error; // Пробрасываем ошибку вместо break, чтобы FastCycle мог отреагировать
         }
 
         // Создаем новое WebSocket соединение
@@ -593,8 +591,11 @@ export class ProductionExchangeService implements IExchangeService {
           );
           await new Promise((resolve) => setTimeout(resolve, delay));
         } else {
-          this.logger.error(`Max reconnection attempts (${this.maxReconnectAttempts}) reached. Stopping watchTickers.`);
-          break;
+          const error = new Error(
+            `Max reconnection attempts (${this.maxReconnectAttempts}) reached. WebSocket connection failed.`,
+          );
+          this.logger.error(error.message);
+          throw error; // Пробрасываем ошибку вместо break
         }
       } catch (error) {
         if (GlobalStateService.getInstance().getIsShuttingDown()) {
@@ -605,15 +606,18 @@ export class ProductionExchangeService implements IExchangeService {
           `WebSocket connection failed: ${error instanceof Error ? error.message : String(error)}. Retrying...`,
         );
 
-        // Увеличиваем счетчик попыток перед повтором
-        const delay = reconnectDelay(this.wsReconnectAttempts);
+        // Увеличиваем счетчик попыток перед повтором (как в основном блоке)
         this.wsReconnectAttempts++;
+        const delay = reconnectDelay(this.wsReconnectAttempts - 1); // -1 потому что счетчик уже увеличен
 
         if (this.wsReconnectAttempts < this.maxReconnectAttempts) {
           await new Promise((resolve) => setTimeout(resolve, delay));
         } else {
-          this.logger.error(`Max reconnection attempts reached. Stopping watchTickers.`);
-          break;
+          const error = new Error(
+            `Max reconnection attempts (${this.maxReconnectAttempts}) reached. WebSocket connection failed.`,
+          );
+          this.logger.error(error.message);
+          throw error; // Пробрасываем ошибку вместо break
         }
       }
     }

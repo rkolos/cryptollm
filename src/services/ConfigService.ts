@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
+import { LoggingService } from './LoggingService.js';
 
 const configSchema = z.object({
   APP_MODE: z.enum(['production', 'testnet', 'dry_run']),
@@ -125,7 +126,13 @@ export class ConfigService {
         const strategyContext = JSON.parse(this.config.STRATEGY_CONTEXT);
         return strategyContext;
       } catch (error) {
-        console.warn('Failed to parse STRATEGY_CONTEXT JSON, falling back to legacy format:', error);
+        // Используем логгер, если доступен, иначе fallback на console
+        try {
+          const logger = LoggingService.getInstance().getLogger('Config');
+          logger.warn('Failed to parse STRATEGY_CONTEXT JSON, falling back to legacy format:', error);
+        } catch {
+          console.warn('Failed to parse STRATEGY_CONTEXT JSON, falling back to legacy format:', error);
+        }
       }
     }
 
@@ -161,7 +168,13 @@ export class ConfigService {
           desiredRiskRewardRatio: riskRules.desired_risk_reward_ratio,
         };
       } catch (error) {
-        console.warn('Failed to parse RISK_RULES JSON, falling back to legacy format:', error);
+        // Используем логгер, если доступен, иначе fallback на console
+        try {
+          const logger = LoggingService.getInstance().getLogger('Config');
+          logger.warn('Failed to parse RISK_RULES JSON, falling back to legacy format:', error);
+        } catch {
+          console.warn('Failed to parse RISK_RULES JSON, falling back to legacy format:', error);
+        }
       }
     }
 

@@ -45,6 +45,8 @@ export class FastCycleService {
   private isMonitoringStarted: boolean = false; // Флаг запуска мониторинга
   private profitCheckStartTime: number = 0; // Timestamp начала проверки прибыли
   private profitCheckTimer: NodeJS.Timeout | null = null; // Таймер для независимой проверки прибыли
+  private lastPositionCheckTime: number = 0; // Timestamp последней проверки наличия позиций
+  private hasOpenPositionsCache: boolean = false; // Кэш результата проверки позиций
 
   private constructor(
     configService: ConfigService,
@@ -97,6 +99,12 @@ export class FastCycleService {
     // Запускаем вечный цикл в фоновом режиме (без await)
     this._runWebSocketLoop().catch((error) => {
       this.logger.error('(FastCycle) Фатальная ошибка в _runWebSocketLoop:', error);
+      // Очищаем таймер при ошибке, чтобы избежать утечки
+      if (this.profitCheckTimer) {
+        clearInterval(this.profitCheckTimer);
+        this.profitCheckTimer = null;
+        this.logger.warn('(FastCycle) Таймер проверки прибыли очищен из-за ошибки WebSocket цикла');
+      }
     });
 
     // Запускаем независимый таймер для проверки прибыли (на случай если тикеры перестанут приходить)
@@ -160,8 +168,29 @@ export class FastCycleService {
           `(FastCycle) watchTickers завершился после ${Math.round(watchDuration / 1000)} сек. Переподключение... (итерация: ${loopIteration})`,
         );
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+
+        // Проверяем, достигнут ли лимит переподключений
+        if (errorMessage.includes('Max reconnection attempts')) {
+          this.logger.error(
+            `(FastCycle) КРИТИЧНО: Достигнут лимит переподключений WebSocket. Соединение не может быть восстановлено.`,
+            error,
+          );
+          // Отправляем критическое уведомление
+          try {
+            this.notificationService.sendAlert(
+              `🚨 **КРИТИЧЕСКАЯ ОШИБКА**\n\nWebSocket соединение не может быть восстановлено после ${loopIteration} попыток переподключения.\n\nБот продолжит работать, но тикеры не будут поступать до перезапуска.`,
+              false,
+            );
+          } catch (notifyError) {
+            this.logger.error('Ошибка при отправке уведомления о критической ошибке WebSocket:', notifyError);
+          }
+          // Прекращаем попытки переподключения
+          break;
+        }
+
         this.logger.error(
-          `(FastCycle) Ошибка watchTickers: ${String(error)}. Переподключение через ${reconnectDelayMs} мс... (итерация: ${loopIteration})`,
+          `(FastCycle) Ошибка watchTickers: ${errorMessage}. Переподключение через ${reconnectDelayMs} мс... (итерация: ${loopIteration})`,
           error,
         );
 
@@ -191,6 +220,8 @@ export class FastCycleService {
 
       let totalProfit = new DecimalConstructor(0) as DecimalValue;
       const exchangeFeePercent = new DecimalConstructor(0.001); // 0.1% комиссия биржи
+      let processedCount = 0;
+      const failedPositions: Array<{ pair: string; error: string }> = [];
 
       for (const position of openPositions) {
         try {
@@ -238,6 +269,7 @@ export class FastCycleService {
           // Суммируем прибыль/убыток по всем позициям (включая отрицательные значения)
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           totalProfit = (totalProfit as any).plus(positionProfit) as DecimalValue;
+          processedCount++;
 
           // Логируем расчет для каждой позиции для отладки
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -250,14 +282,28 @@ export class FastCycleService {
               `прибыль/убыток=${positionProfitNum.toFixed(4)} USDT`,
           );
         } catch (error) {
-          this.logger.warn(`Ошибка при расчете прибыли для позиции ${position.pair}:`, error);
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          failedPositions.push({ pair: position.pair, error: errorMessage });
+          this.logger.warn(`Ошибка при расчете прибыли для позиции ${position.pair}: ${errorMessage}`, error);
           // Продолжаем с другими позициями
         }
       }
 
+      // Логируем результат с деталями
+      if (failedPositions.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const totalProfitNum = (totalProfit as any).toNumber();
+        this.logger.warn(
+          `Расчет прибыли завершен частично: обработано ${processedCount}/${openPositions.length} позиций. ` +
+            `Частичная прибыль: ${totalProfitNum.toFixed(4)} USDT. ` +
+            `Ошибки в позициях: ${failedPositions.map((p) => `${p.pair} (${p.error})`).join(', ')}`,
+        );
+      }
+
       return totalProfit;
     } catch (error) {
-      this.logger.error('Ошибка при расчете общей прибыли:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Критическая ошибка при расчете общей прибыли: ${errorMessage}`, error);
       return null;
     }
   }
@@ -277,7 +323,9 @@ export class FastCycleService {
         return;
       }
 
-      // Импортируем WorkerService для закрытия позиций
+      // Примечание: Используем динамические импорты здесь, чтобы избежать циклических зависимостей
+      // при инициализации FastCycleService. Эти сервисы требуются только в редких случаях
+      // (при автоматическом закрытии всех позиций), поэтому динамический импорт оправдан.
       const { WorkerService } = await import('./WorkerService.js');
       const { ValidatorService } = await import('./ValidatorService.js');
       const { GuaranteedOrderExecutionService } = await import('./GuaranteedOrderExecutionService.js');
@@ -516,81 +564,67 @@ export class FastCycleService {
     try {
       this.logger.info('Очищаем базу данных от информации об открытых сделках...');
 
-      // Импортируем необходимые модули
-      const { Pool } = await import('pg');
-      const { ConfigService } = await import('./ConfigService.js');
+      // Используем DatabaseService вместо создания нового подключения
+      const { DatabaseService } = await import('./DatabaseService.js');
+      const databaseService = DatabaseService.getInstance();
 
-      // Создаем отдельное подключение к БД для очистки
-      const pool = new Pool({
-        host: process.env.DB_HOST || 'localhost',
-        port: parseInt(process.env.DB_PORT || '5432'),
-        user: process.env.DB_USER || 'cryptollm',
-        password: process.env.DB_PASSWORD || 'cryptollm',
-        database: process.env.DB_NAME || 'cryptollm',
-      });
+      this.logger.info(
+        'Очищаем таблицы ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log...',
+      );
 
-      try {
-        this.logger.info(
-          'Очищаем таблицы ActivePositions, ActiveOrders, TSL_State, TradeHistory, LLM_Triggers, LLM_Decision_Log...',
-        );
+      // Очищаем все таблицы и сбрасываем счетчики SERIAL
+      await databaseService.query(
+        'TRUNCATE activepositions, activeorders, tsl_state, tradehistory, llm_triggers, llm_decision_log RESTART IDENTITY CASCADE',
+      );
 
-        // Очищаем все таблицы и сбрасываем счетчики SERIAL
-        await pool.query(
-          'TRUNCATE activepositions, activeorders, tsl_state, tradehistory, llm_triggers, llm_decision_log RESTART IDENTITY CASCADE',
-        );
+      this.logger.info('Все таблицы очищены, счетчики ID сброшены');
 
-        this.logger.info('Все таблицы очищены, счетчики ID сброшены');
+      // Создаем начальные триггеры для всех пар из watchlist
+      this.logger.info('Создаем начальные триггеры с таймаутами...');
+      const watchlist = this.configService.getWatchlist();
 
-        // Создаем начальные триггеры для всех пар из watchlist
-        this.logger.info('Создаем начальные триггеры с таймаутами...');
-        const config = ConfigService.getInstance();
-        const watchlist = config.getWatchlist();
+      this.logger.info(`Пары для инициализации: ${watchlist.join(', ')}`);
 
-        this.logger.info(`Пары для инициализации: ${watchlist.join(', ')}`);
+      for (let i = 0; i < watchlist.length; i++) {
+        const pair = watchlist[i];
+        // Создаем триггеры с задержкой 1 минута между парами
+        // Первая пара сработает через 1 минуту, вторая через 2 минуты и т.д.
+        const initialTimeout = Date.now() + (i + 1) * 60000; // (i + 1) минут от текущего времени
 
-        for (let i = 0; i < watchlist.length; i++) {
-          const pair = watchlist[i];
-          // Создаем триггеры с задержкой 1 минута между парами
-          // Первая пара сработает через 1 минуту, вторая через 2 минуты и т.д.
-          const initialTimeout = Date.now() + (i + 1) * 60000; // (i + 1) минут от текущего времени
+        const triggerConditions = [
+          {
+            type: 'timeout' as const,
+            value: initialTimeout,
+          },
+        ];
 
-          const triggerConditions = [
-            {
-              type: 'timeout' as const,
-              value: initialTimeout,
-            },
-          ];
+        try {
+          await databaseService.query(
+            `INSERT INTO LLM_Triggers (pair, reason, trigger_conditions_json, requested_data_json, updated_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (pair) DO UPDATE SET
+               reason = EXCLUDED.reason,
+               trigger_conditions_json = EXCLUDED.trigger_conditions_json,
+               requested_data_json = EXCLUDED.requested_data_json,
+               updated_at = EXCLUDED.updated_at`,
+            [
+              pair,
+              'Auto close all positions - trigger reset after profit taking',
+              JSON.stringify(triggerConditions),
+              null,
+              new Date(),
+            ],
+          );
 
-          try {
-            await pool.query(
-              `INSERT INTO LLM_Triggers (pair, reason, trigger_conditions_json, requested_data_json, updated_at)
-               VALUES ($1, $2, $3, $4, $5)
-               ON CONFLICT (pair) DO UPDATE SET
-                 reason = EXCLUDED.reason,
-                 trigger_conditions_json = EXCLUDED.trigger_conditions_json,
-                 requested_data_json = EXCLUDED.requested_data_json,
-                 updated_at = EXCLUDED.updated_at`,
-              [
-                pair,
-                'Auto close all positions - trigger reset after profit taking',
-                JSON.stringify(triggerConditions),
-                null,
-                new Date(),
-              ],
-            );
-
-            const triggerTime = new Date(initialTimeout).toLocaleTimeString();
-            this.logger.info(`${pair}: триггер на ${triggerTime} (через ${i + 1} мин.)`);
-          } catch (error) {
-            this.logger.error(`Ошибка при создании триггера для ${pair}:`, error);
-            throw error;
-          }
+          const triggerTime = new Date(initialTimeout).toLocaleTimeString();
+          this.logger.info(`${pair}: триггер на ${triggerTime} (через ${i + 1} мин.)`);
+        } catch (error) {
+          this.logger.error(`Ошибка при создании триггера для ${pair}:`, error);
+          throw error;
         }
-
-        this.logger.info('Триггеры пересозданы с таймаутами');
-      } finally {
-        await pool.end();
       }
+
+      this.logger.info('Триггеры пересозданы с таймаутами');
     } catch (error) {
       this.logger.error('Ошибка при очистке базы данных:', error);
       throw error;
@@ -629,10 +663,12 @@ export class FastCycleService {
       // Расчет общей прибыли и автоматическое закрытие позиций (не чаще чем раз в 30 секунд)
       if (now - this.lastProfitCheck > 30000 && !this.isCheckingProfit) {
         // 30 секунд и проверка не выполняется
+        // Сохраняем старое значение для корректного вычисления времени
+        const savedLastCheck = this.lastProfitCheck;
         // Устанавливаем флаг ДО асинхронного вызова для защиты от race condition
         this.isCheckingProfit = true;
         this.lastProfitCheck = now;
-        const timeSinceLastCheck = Math.round((now - this.lastProfitCheck) / 1000);
+        const timeSinceLastCheck = savedLastCheck > 0 ? Math.round((now - savedLastCheck) / 1000) : 0;
         this.logger.info(`(FastCycle) Запуск проверки прибыли (прошло ${timeSinceLastCheck} сек с последней проверки)`);
         this._checkAndClosePositionsIfProfitable().catch((error) => {
           this.logger.error(`(FastCycle) [${ticker.symbol}] Ошибка при проверке прибыли: ${String(error)}`, error);
@@ -720,14 +756,22 @@ export class FastCycleService {
         return;
       }
 
-      // Проверяем, есть ли открытые позиции
-      const accountState = this.accountState.getAccountState();
-      if (accountState.open_positions.length === 0) {
+      const now = Date.now();
+
+      // Оптимизация: проверяем наличие позиций только раз в 5 секунд для экономии ресурсов
+      const shouldCheckPositions = now - this.lastPositionCheckTime > 5000;
+      if (shouldCheckPositions) {
+        const accountState = this.accountState.getAccountState();
+        this.hasOpenPositionsCache = accountState.open_positions.length > 0;
+        this.lastPositionCheckTime = now;
+      }
+
+      // Используем кэшированное значение
+      if (!this.hasOpenPositionsCache) {
         return; // Нет позиций, нечего проверять
       }
 
       // Проверяем, прошло ли достаточно времени с последней проверки
-      const now = Date.now();
       const timeSinceLastCheck = now - this.lastProfitCheck;
 
       if (timeSinceLastCheck >= 30000) {

@@ -255,7 +255,8 @@ async function main(): Promise<void> {
         notificationService.sendAlert(`FATAL ERROR during startup: ${errorMessage}`, false);
       } catch (notifyError) {
         // Игнорируем ошибки уведомлений при фатальной ошибке
-        console.error('Failed to send notification:', notifyError);
+        const logger = LoggingService.getInstance().getLogger('Application');
+        logger.error('Failed to send notification:', notifyError);
       }
     }
 
@@ -336,20 +337,38 @@ async function handleShutdown(): Promise<void> {
 // Привязка обработчиков сигналов
 process.on('SIGINT', () => {
   handleShutdown().catch((error) => {
-    console.error('Fatal error in shutdown handler:', error);
+    try {
+      const logger = LoggingService.getInstance().getLogger('Application');
+      logger.error('Fatal error in shutdown handler:', error);
+    } catch {
+      // Если логгер недоступен, используем console как fallback
+      console.error('Fatal error in shutdown handler:', error);
+    }
     process.exit(1);
   });
 });
 
 process.on('SIGTERM', () => {
   handleShutdown().catch((error) => {
-    console.error('Fatal error in shutdown handler:', error);
+    try {
+      const logger = LoggingService.getInstance().getLogger('Application');
+      logger.error('Fatal error in shutdown handler:', error);
+    } catch {
+      // Если логгер недоступен, используем console как fallback
+      console.error('Fatal error in shutdown handler:', error);
+    }
     process.exit(1);
   });
 });
 
 // Запуск приложения
 main().catch((error) => {
-  console.error('Fatal error:', error);
+  try {
+    const logger = LoggingService.getInstance().getLogger('Application');
+    logger.error('Fatal error:', error);
+  } catch {
+    // Если логгер недоступен, используем console как fallback
+    console.error('Fatal error:', error);
+  }
   process.exit(1);
 });

@@ -601,6 +601,15 @@ export class NotificationService {
     winRate: number;
     avgWin: DecimalValue;
     avgLoss: DecimalValue;
+    openPositions: Array<{
+      pair: string;
+      side: string;
+      amount: number;
+      entryPrice: number;
+      currentPrice: number;
+      unrealizedPnl: number;
+      pnlPercentage: number;
+    }>;
   }> {
     if (!this.databaseService) {
       throw new Error('DatabaseService not injected');
@@ -631,6 +640,7 @@ export class NotificationService {
           winRate: 0,
           avgWin: new DecimalConstructor('0') as DecimalValue,
           avgLoss: new DecimalConstructor('0') as DecimalValue,
+          openPositions: [],
         };
       }
 
@@ -651,6 +661,78 @@ export class NotificationService {
           : (new DecimalConstructor('0') as DecimalValue);
       const winRate = closedPositions > 0 ? (wins / closedPositions) * 100 : 0;
 
+      // Получаем открытые позиции
+      let openPositions: Array<{
+        pair: string;
+        side: string;
+        amount: number;
+        entryPrice: number;
+        currentPrice: number;
+        unrealizedPnl: number;
+        pnlPercentage: number;
+      }> = [];
+
+      try {
+        if (this.exchangeService) {
+          const openPositionsResult = await this.databaseService.query(
+            `SELECT pair, side, amount, average_entry_price, stop_loss_price
+             FROM activepositions
+             ORDER BY created_at ASC`,
+          );
+
+          if (openPositionsResult.rows && openPositionsResult.rows.length > 0) {
+            // Получаем уникальные пары для запроса текущих цен
+            const uniquePairs = [...new Set(openPositionsResult.rows.map((row) => row.pair))];
+
+            // Получаем текущие цены для всех пар
+            const currentPrices: { [pair: string]: number } = {};
+            for (const pair of uniquePairs) {
+              try {
+                const ticker = await this.exchangeService.fetchTicker(pair);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                currentPrices[pair] = (ticker.last as any).toNumber();
+              } catch (priceError) {
+                this.logger.warn(`Could not get current price for ${pair}:`, priceError);
+                currentPrices[pair] = 0;
+              }
+            }
+
+            // Рассчитываем прибыль/убыток для каждой позиции
+            for (const row of openPositionsResult.rows) {
+              const pair = row.pair;
+              const side = row.side;
+              const amount = parseFloat(row.amount);
+              const entryPrice = parseFloat(row.average_entry_price);
+              const currentPrice = currentPrices[pair] || entryPrice;
+
+              let unrealizedPnl = 0;
+              let pnlPercentage = 0;
+
+              if (side === 'long') {
+                unrealizedPnl = (currentPrice - entryPrice) * amount;
+                pnlPercentage = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+              } else if (side === 'short') {
+                unrealizedPnl = (entryPrice - currentPrice) * amount;
+                pnlPercentage = entryPrice > 0 ? ((entryPrice - currentPrice) / entryPrice) * 100 : 0;
+              }
+
+              openPositions.push({
+                pair,
+                side,
+                amount,
+                entryPrice,
+                currentPrice,
+                unrealizedPnl,
+                pnlPercentage,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        this.logger.error('Error getting open positions:', error);
+        openPositions = [];
+      }
+
       return {
         totalTrades,
         closedPositions,
@@ -659,6 +741,7 @@ export class NotificationService {
         winRate,
         avgWin,
         avgLoss,
+        openPositions,
       };
     } catch (error) {
       this.logger.error('Error getting trading summary:', error);
@@ -671,6 +754,7 @@ export class NotificationService {
         winRate: 0,
         avgWin: new DecimalConstructor('0') as DecimalValue,
         avgLoss: new DecimalConstructor('0') as DecimalValue,
+        openPositions: [],
       };
     }
   }
@@ -686,6 +770,15 @@ export class NotificationService {
     winRate: number;
     avgWin: DecimalValue;
     avgLoss: DecimalValue;
+    openPositions: Array<{
+      pair: string;
+      side: string;
+      amount: number;
+      entryPrice: number;
+      currentPrice: number;
+      unrealizedPnl: number;
+      pnlPercentage: number;
+    }>;
   }): string {
     const lines: string[] = [];
 
@@ -728,6 +821,28 @@ export class NotificationService {
         const avgLossDecimal = summary.avgLoss as any;
         const avgLossEscaped = this._escapeMarkdown(avgLossDecimal.abs().toFixed(2));
         lines.push(`*Средний убыток:* \`${avgLossEscaped}\` USDT`);
+      }
+    }
+
+    // Открытые позиции
+    if (summary.openPositions.length > 0) {
+      lines.push('\n*📊 Открытые позиции:*');
+
+      for (const position of summary.openPositions) {
+        const pairEscaped = this._escapeMarkdown(position.pair);
+        const sideText = position.side === 'long' ? '📈 LONG' : '📉 SHORT';
+        const amountEscaped = this._escapeMarkdown(position.amount.toFixed(6));
+        const entryPriceEscaped = this._escapeMarkdown(position.entryPrice.toFixed(6));
+        const currentPriceEscaped = this._escapeMarkdown(position.currentPrice.toFixed(6));
+
+        const pnlSign = position.unrealizedPnl >= 0 ? '🟢' : '🔴';
+        const pnlValueEscaped = this._escapeMarkdown(Math.abs(position.unrealizedPnl).toFixed(2));
+        const pnlPercentageEscaped = this._escapeMarkdown(Math.abs(position.pnlPercentage).toFixed(2));
+
+        lines.push(`*${pairEscaped}* ${sideText}`);
+        lines.push(`  • Размер: \`${amountEscaped}\``);
+        lines.push(`  • Вход: \`${entryPriceEscaped}\` → Текущая: \`${currentPriceEscaped}\``);
+        lines.push(`  • P\\&L: ${pnlSign} \`${pnlValueEscaped}\` USDT (\`${pnlPercentageEscaped}\`%)`);
       }
     }
 

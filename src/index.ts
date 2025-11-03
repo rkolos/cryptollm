@@ -233,6 +233,7 @@ async function main(): Promise<void> {
     globalFastCycle = FastCycleService.getInstance(
       config,
       globalState,
+      accountStateService,
       exchangeService,
       tslHandler,
       priceTriggerHandler,

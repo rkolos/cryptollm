@@ -6,7 +6,6 @@ import { ConfigService } from '../src/services/ConfigService.js';
 import { LoggingService } from '../src/services/LoggingService.js';
 import { DatabaseService } from '../src/services/DatabaseService.js';
 import { EventBusService } from '../src/services/EventBusService.js';
-import { NotificationService } from '../src/services/NotificationService.js';
 import { GlobalStateService } from '../src/services/GlobalStateService.js';
 import { AccountStateService } from '../src/services/AccountStateService.js';
 import { ExchangeRulesService } from '../src/services/ExchangeRulesService.js';
@@ -14,7 +13,6 @@ import { ValidatorService } from '../src/services/ValidatorService.js';
 import { GuaranteedOrderExecutionService } from '../src/services/GuaranteedOrderExecutionService.js';
 import { WorkerService } from '../src/services/WorkerService.js';
 import { ProductionExchangeService } from '../src/services/ProductionExchangeService.js';
-import { MockExchangeService } from '../src/services/MockExchangeService.js';
 import type { LLMDecision, IExchangeService } from '../src/interfaces/IExchangeService.js';
 import type { DecimalValue, MarketData } from '../src/interfaces/IValidatorTypes.js';
 import Decimal from 'decimal.js';
@@ -201,7 +199,7 @@ async function closeAllPositionsAndSellToUSDT() {
     executionService,
     databaseService,
     eventBus,
-    notificationServiceStub as any, // используем stub
+    notificationServiceStub, // используем stub
     globalStateService,
     accountStateService,
     exchangeRulesService,

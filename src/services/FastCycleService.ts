@@ -1,8 +1,14 @@
 import { LoggingService } from './LoggingService.js';
 import { ConfigService } from './ConfigService.js';
 import { GlobalStateService } from './GlobalStateService.js';
+import { AccountStateService } from './AccountStateService.js';
 import type { IExchangeService, IDecimalTicker } from '../interfaces/IExchangeService.js';
+import type { DecimalValue } from '../interfaces/IValidatorTypes.js';
 import type winston from 'winston';
+import Decimal from 'decimal.js';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DecimalConstructor = Decimal as any;
 
 /**
  * Интерфейс для TSLHandlerService (реализован в задаче 5.4)
@@ -23,21 +29,25 @@ export class FastCycleService {
   private readonly logger: winston.Logger;
   private readonly configService: ConfigService;
   private readonly globalState: GlobalStateService;
+  private readonly accountState: AccountStateService;
   private readonly exchangeService: IExchangeService;
   private readonly tslHandler: ITSLHandlerService;
   private readonly priceTriggerHandler: IPriceTriggerHandler;
 
   private isStopping: boolean = false;
+  private isClosingAllPositions: boolean = false; // Защита от множественных одновременных закрытий
 
   private constructor(
     configService: ConfigService,
     globalState: GlobalStateService,
+    accountState: AccountStateService,
     exchangeService: IExchangeService,
     tslHandler: ITSLHandlerService,
     priceTriggerHandler: IPriceTriggerHandler,
   ) {
     this.configService = configService;
     this.globalState = globalState;
+    this.accountState = accountState;
     this.exchangeService = exchangeService;
     this.tslHandler = tslHandler;
     this.priceTriggerHandler = priceTriggerHandler;
@@ -48,6 +58,7 @@ export class FastCycleService {
   public static getInstance(
     configService: ConfigService,
     globalState: GlobalStateService,
+    accountState: AccountStateService,
     exchangeService: IExchangeService,
     tslHandler: ITSLHandlerService,
     priceTriggerHandler: IPriceTriggerHandler,
@@ -56,6 +67,7 @@ export class FastCycleService {
       FastCycleService.instance = new FastCycleService(
         configService,
         globalState,
+        accountState,
         exchangeService,
         tslHandler,
         priceTriggerHandler,
@@ -121,6 +133,234 @@ export class FastCycleService {
   }
 
   /**
+   * Рассчитывает общую прибыльность всех открытых позиций с учетом комиссий биржи
+   * @returns Общая прибыль в USDT или null, если расчет невозможен
+   */
+  private async _calculateTotalProfit(): Promise<DecimalValue | null> {
+    try {
+      // Получаем состояние аккаунта
+      const accountState = this.accountState.getAccountState();
+      const openPositions = accountState.open_positions;
+
+      if (openPositions.length === 0) {
+        return new DecimalConstructor(0) as DecimalValue;
+      }
+
+      let totalProfit = new DecimalConstructor(0) as DecimalValue;
+      const exchangeFeePercent = new DecimalConstructor(0.001); // 0.1% комиссия биржи
+
+      for (const position of openPositions) {
+        try {
+          // Получаем текущую цену для позиции
+          const ticker = await this.exchangeService.fetchTicker(position.pair);
+          const currentPrice = ticker.last;
+
+          // Расчет гипотетической прибыли при закрытии позиции
+          const entryPrice = position.average_entry_price;
+          const amount = position.amount;
+          // Примечание: в гипотетическом расчете используем 0 для комиссии на вход,
+          // так как точные данные доступны только при реальном закрытии
+          const entryFeeCost = new DecimalConstructor(0); // Комиссия на вход (гипотетическая)
+
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const entryPriceDecimal = entryPrice as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const currentPriceDecimal = currentPrice as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const amountDecimal = amount as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const entryFeeDecimal = entryFeeCost as any;
+
+          let grossProfit: DecimalValue;
+          if (position.side === 'long') {
+            // Для LONG: валовая прибыль = (текущая_цена - цена_входа) * объем
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            grossProfit = currentPriceDecimal.minus(entryPriceDecimal).mul(amountDecimal) as DecimalValue;
+          } else {
+            // Для SHORT: валовая прибыль = (цена_входа - текущая_цена) * объем
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            grossProfit = entryPriceDecimal.minus(currentPriceDecimal).mul(amountDecimal) as DecimalValue;
+          }
+
+          // Вычитаем комиссии: комиссия на вход + комиссия на выход (0.1% от объема в USDT)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const closeValue = currentPriceDecimal.mul(amountDecimal) as DecimalValue;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const closeFee = closeValue.mul(exchangeFeePercent) as DecimalValue;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const totalFees = entryFeeDecimal.plus(closeFee) as DecimalValue;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const positionProfit = (grossProfit as any).minus(totalFees) as DecimalValue;
+
+          // Суммируем прибыль по всем позициям
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          totalProfit = (totalProfit as any).plus(positionProfit) as DecimalValue;
+        } catch (error) {
+          this.logger.warn(`Ошибка при расчете прибыли для позиции ${position.pair}:`, error);
+          // Продолжаем с другими позициями
+        }
+      }
+
+      return totalProfit;
+    } catch (error) {
+      this.logger.error('Ошибка при расчете общей прибыли:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Закрывает все открытые позиции через market ордера
+   */
+  private async _closeAllPositions(): Promise<void> {
+    try {
+      this.logger.info('Начинаем закрытие всех открытых позиций...');
+
+      const accountState = this.accountState.getAccountState();
+      const openPositions = accountState.open_positions;
+
+      if (openPositions.length === 0) {
+        this.logger.info('Нет открытых позиций для закрытия');
+        return;
+      }
+
+      // Импортируем WorkerService для закрытия позиций
+      const { WorkerService } = await import('./WorkerService.js');
+      const { ValidatorService } = await import('./ValidatorService.js');
+      const { GuaranteedOrderExecutionService } = await import('./GuaranteedOrderExecutionService.js');
+      const { DatabaseService } = await import('./DatabaseService.js');
+      const { EventBusService } = await import('./EventBusService.js');
+      const { NotificationService } = await import('./NotificationService.js');
+      const { ExchangeRulesService } = await import('./ExchangeRulesService.js');
+
+      const databaseService = DatabaseService.getInstance();
+      const eventBus = EventBusService.getInstance();
+      const notificationService = NotificationService.getInstance(this.configService);
+      const exchangeRulesService = ExchangeRulesService.getInstance();
+      const validatorService = ValidatorService.getInstance(exchangeRulesService);
+      const executionService = GuaranteedOrderExecutionService.getInstance();
+      executionService.initialize(this.exchangeService);
+
+      const workerService = WorkerService.getInstance(
+        validatorService,
+        executionService,
+        databaseService,
+        eventBus,
+        notificationService,
+        this.globalState,
+        this.accountState,
+        exchangeRulesService,
+        this.configService,
+      );
+
+      // Закрываем каждую позицию, проверяя актуальность перед каждым закрытием
+      for (const originalPosition of openPositions) {
+        try {
+          // Проверяем, существует ли позиция еще (могла быть закрыта TSL или другой логикой)
+          const currentAccountState = this.accountState.getAccountState();
+          const currentPosition = currentAccountState.open_positions.find((p) => p.pair === originalPosition.pair);
+
+          if (!currentPosition) {
+            this.logger.info(`Позиция ${originalPosition.pair} уже закрыта, пропускаем`);
+            continue;
+          }
+
+          this.logger.info(`Закрываем позицию ${currentPosition.pair}...`);
+
+          // Создаем decision для закрытия позиции
+          const closeDecision = {
+            action: 'CLOSE_POSITION' as const,
+            pair: currentPosition.pair,
+            parameters: {
+              type: 'market' as const,
+              amount_percent: 100, // Закрываем всю позицию
+            },
+            justification: 'Автоматическое закрытие всех позиций при достижении целевой прибыли',
+          };
+
+          // Получаем актуальное состояние для этой позиции
+          const currentMarketData = {
+            pair: currentPosition.pair,
+            current_price: (await this.exchangeService.fetchTicker(currentPosition.pair)).last,
+          };
+
+          // Получаем strategy context
+          const strategyContext = {
+            role: 'Auto Close All Positions',
+            style: 'Conservative',
+            risk_rules: {
+              default_risk_per_trade_percent: 1,
+              max_allowed_risk_per_trade_percent: 5,
+              max_total_portfolio_risk_percent: 10,
+              desired_risk_reward_ratio: 2,
+            },
+            watchlist: this.configService.getWatchlist(),
+          };
+
+          // Выполняем закрытие через WorkerService
+          const llmDecisionLogId = `auto-close-${currentPosition.pair}-${Date.now()}`;
+          await workerService.execute(
+            closeDecision,
+            llmDecisionLogId,
+            currentAccountState,
+            strategyContext,
+            currentMarketData,
+          );
+
+          this.logger.info(`Позиция ${currentPosition.pair} успешно закрыта`);
+
+          // Обновляем состояние аккаунта после каждого закрытия
+          await this.accountState.refreshNow();
+        } catch (error) {
+          this.logger.error(`Ошибка при закрытии позиции ${originalPosition.pair}:`, error);
+          // Продолжаем с другими позициями
+        }
+      }
+
+      this.logger.info('Закрытие всех позиций завершено');
+    } catch (error) {
+      this.logger.error('Критическая ошибка при закрытии всех позиций:', error);
+    }
+  }
+
+  /**
+   * Проверяет общую прибыль всех позиций и закрывает их, если прибыль > 10 USD
+   */
+  private async _checkAndClosePositionsIfProfitable(): Promise<void> {
+    // Защита от множественных одновременных вызовов
+    if (this.isClosingAllPositions) {
+      return;
+    }
+
+    try {
+      const totalProfit = await this._calculateTotalProfit();
+
+      if (totalProfit === null) {
+        return; // Не удалось рассчитать прибыль
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const profitDecimal = totalProfit as any;
+      const minProfitThreshold = new DecimalConstructor(10); // 10 долларов
+
+      if (profitDecimal.gte(minProfitThreshold)) {
+        this.logger.info(`Обнаружена общая прибыль: ${profitDecimal.toFixed(2)} USDT. Закрываем все позиции...`);
+
+        // Устанавливаем флаг блокировки
+        this.isClosingAllPositions = true;
+
+        await this._closeAllPositions();
+
+        this.logger.info(`Все позиции закрыты. Целевая прибыль зафиксирована: ${profitDecimal.toFixed(2)} USDT`);
+      }
+    } catch (error) {
+      this.logger.error('Ошибка при проверке и закрытии позиций:', error);
+    } finally {
+      // Снимаем флаг блокировки
+      this.isClosingAllPositions = false;
+    }
+  }
+
+  /**
    * Обработчик тика (вызывается на каждый обновленный тикер)
    * КРИТИЧНО: Метод НЕ async и НЕ содержит await
    */
@@ -136,6 +376,11 @@ export class FastCycleService {
 
       // (Задача 5.5) Делегирование Price Triggers (без await)
       this.priceTriggerHandler.handleTicker(ticker);
+
+      // Расчет общей прибыли и автоматическое закрытие позиций (fire-and-forget)
+      this._checkAndClosePositionsIfProfitable().catch((error) => {
+        this.logger.error(`(FastCycle) [${ticker.symbol}] Ошибка при проверке прибыли: ${String(error)}`);
+      });
     } catch (error) {
       this.logger.error(`(FastCycle) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ обработчика "тика": ${String(error)}`, error);
       // Не бросаем ошибку, чтобы не "убить" WS-цикл

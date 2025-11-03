@@ -171,14 +171,53 @@ export class WorkerService {
             throw new Error(`[${pair}] Не удалось определить цену входа для локального выполнения`);
           }
 
-          // Получаем цену стоп-лосса для расчета дистанции
-          const stopLossPrice = decision.parameters.stop_loss_price;
-          if (!stopLossPrice) {
-            throw new Error(`[${pair}] Не удалось определить цену стоп-лосса для локального выполнения`);
-          }
-
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const entryPriceDecimal = entryPrice as any;
+
+          // Получаем цену стоп-лосса или устанавливаем автоматически (10% от суммы покупки)
+          let stopLossPrice = decision.parameters.stop_loss_price;
+          if (!stopLossPrice) {
+            // Автоматическая установка SL: 10% ниже цены входа для LONG, 10% выше для SHORT
+            const slPercent = new DecimalConstructor(10); // 10%
+            const hundred = new DecimalConstructor(100);
+            if (decision.action === 'OPEN_LONG') {
+              // Для LONG: SL = entryPrice * (1 - 0.10) = entryPrice * 0.90
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const slMultiplier = hundred.minus(slPercent).div(hundred) as any;
+              stopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+            } else {
+              // Для SHORT: SL = entryPrice * (1 + 0.10) = entryPrice * 1.10
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const slMultiplier = hundred.plus(slPercent).div(hundred) as any;
+              stopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+            }
+            this.logger.info(
+              `[${pair}] Автоматическая установка SL: ${stopLossPrice} (10% от цены входа ${entryPriceDecimal.toString()})`,
+            );
+          }
+
+          // Получаем цену тейк-профита или устанавливаем автоматически (10% от суммы покупки)
+          let takeProfitPrice = decision.parameters.take_profit_price;
+          if (!takeProfitPrice) {
+            // Автоматическая установка TP: 10% выше цены входа для LONG, 10% ниже для SHORT
+            const tpPercent = new DecimalConstructor(10); // 10%
+            const hundred = new DecimalConstructor(100);
+            if (decision.action === 'OPEN_LONG') {
+              // Для LONG: TP = entryPrice * (1 + 0.10) = entryPrice * 1.10
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const tpMultiplier = hundred.plus(tpPercent).div(hundred) as any;
+              takeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+            } else {
+              // Для SHORT: TP = entryPrice * (1 - 0.10) = entryPrice * 0.90
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const tpMultiplier = hundred.minus(tpPercent).div(hundred) as any;
+              takeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+            }
+            this.logger.info(
+              `[${pair}] Автоматическая установка TP: ${takeProfitPrice} (10% от цены входа ${entryPriceDecimal.toString()})`,
+            );
+          }
+
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const stopLossPriceDecimal = stopLossPrice as any;
 
@@ -231,6 +270,67 @@ export class WorkerService {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const recalculatedUsdAtRisk = roundedAmountCoinDecimal.mul(distanceDecimal) as DecimalValue;
 
+          // Пересчитываем цены SL/TP пропорционально изменению размера позиции
+          // Сохраняем процентное расстояние до SL/TP относительно цены входа
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const hundred = new DecimalConstructor(100);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const originalStopLossPriceDecimal = stopLossPrice as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const originalTakeProfitPriceDecimal = takeProfitPrice as any;
+
+          // Рассчитываем процентное расстояние от цены входа до SL
+          const slDistancePercentDecimal = entryPriceDecimal
+            .sub(originalStopLossPriceDecimal)
+            .abs()
+            .div(entryPriceDecimal)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .mul(hundred) as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const slDistancePercent = slDistancePercentDecimal as any;
+
+          // Рассчитываем процентное расстояние от цены входа до TP
+          const tpDistancePercentDecimal = originalTakeProfitPriceDecimal
+            .sub(entryPriceDecimal)
+            .abs()
+            .div(entryPriceDecimal)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .mul(hundred) as any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tpDistancePercent = tpDistancePercentDecimal as any;
+
+          // Применяем процентное расстояние к новой цене входа (которая не изменилась, но для консистентности)
+          // Для LONG: SL ниже entryPrice, TP выше entryPrice
+          // Для SHORT: SL выше entryPrice, TP ниже entryPrice
+          let recalculatedStopLossPrice: number;
+          let recalculatedTakeProfitPrice: number;
+
+          if (decision.action === 'OPEN_LONG') {
+            // LONG: SL = entryPrice * (1 - slDistancePercent/100), TP = entryPrice * (1 + tpDistancePercent/100)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const slMultiplier = hundred.minus(slDistancePercent).div(hundred) as any;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const tpMultiplier = hundred.plus(tpDistancePercent).div(hundred) as any;
+            recalculatedStopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+            recalculatedTakeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+          } else {
+            // SHORT: SL = entryPrice * (1 + slDistancePercent/100), TP = entryPrice * (1 - tpDistancePercent/100)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const slMultiplier = hundred.plus(slDistancePercent).div(hundred) as any;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const tpMultiplier = hundred.minus(tpDistancePercent).div(hundred) as any;
+            recalculatedStopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+            recalculatedTakeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+          }
+
+          // Обновляем параметры решения с пересчитанными ценами SL/TP
+          decision.parameters.stop_loss_price = recalculatedStopLossPrice;
+          decision.parameters.take_profit_price = recalculatedTakeProfitPrice;
+
+          this.logger.info(
+            `[${pair}] Пересчет SL/TP: SL=${recalculatedStopLossPrice.toFixed(8)} (было ${originalStopLossPriceDecimal.toFixed(8)}), TP=${recalculatedTakeProfitPrice.toFixed(8)} (было ${originalTakeProfitPriceDecimal.toFixed(8)})`,
+          );
+
           // Проверяем minNotional
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const minNotionalDecimal = exchangeRules.minNotional as any;
@@ -264,7 +364,7 @@ export class WorkerService {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const recalculatedUsdAtRiskDecimal = recalculatedUsdAtRisk as any;
               this.logger.info(
-                `[${pair}] ✅ ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитанный размер позиции ${roundedAmountCoinDecimal.toString()} монет ($${roundedAmountUsdDecimal.toFixed(2)}), реальный риск: $${recalculatedUsdAtRiskDecimal.toFixed(2)}`,
+                `[${pair}] ✅ ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитанный размер позиции ${roundedAmountCoinDecimal.toString()} монет ($${roundedAmountUsdDecimal.toFixed(2)}), реальный риск: $${recalculatedUsdAtRiskDecimal.toFixed(2)}, SL=${decision.parameters.stop_loss_price?.toFixed(8)}, TP=${decision.parameters.take_profit_price?.toFixed(8)}`,
               );
 
               // Обновляем лог в БД с пометкой о локальном выполнении
@@ -531,15 +631,76 @@ export class WorkerService {
     const amountDecimal = new DecimalConstructor(realAmount.toString());
     const feeCostDecimal = new DecimalConstructor(realFeeCost.toString() || '0');
 
+    // Автоматическая установка SL/TP если модель не указала их (10% от суммы покупки)
+    let finalStopLossPrice = stop_loss_price;
+    let finalTakeProfitPrice = take_profit_price;
+
+    if (!finalStopLossPrice || !finalTakeProfitPrice) {
+      const slTpPercent = new DecimalConstructor(10); // 10%
+      const hundred = new DecimalConstructor(100);
+
+      if (!finalStopLossPrice) {
+        // Автоматическая установка SL: 10% ниже цены входа для LONG, 10% выше для SHORT
+        if (action === 'OPEN_LONG') {
+          // Для LONG: SL = entryPrice * (1 - 0.10) = entryPrice * 0.90
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const slMultiplier = hundred.minus(slTpPercent).div(hundred) as any;
+          finalStopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+        } else {
+          // Для SHORT: SL = entryPrice * (1 + 0.10) = entryPrice * 1.10
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const slMultiplier = hundred.plus(slTpPercent).div(hundred) as any;
+          finalStopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+        }
+        this.logger.info(
+          `[${pair}] Автоматическая установка SL: ${finalStopLossPrice?.toFixed(8) || 'N/A'} (10% от цены входа ${entryPriceDecimal.toString()})`,
+        );
+      }
+
+      if (!finalTakeProfitPrice) {
+        // Автоматическая установка TP: 10% выше цены входа для LONG, 10% ниже для SHORT
+        if (action === 'OPEN_LONG') {
+          // Для LONG: TP = entryPrice * (1 + 0.10) = entryPrice * 1.10
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tpMultiplier = hundred.plus(slTpPercent).div(hundred) as any;
+          finalTakeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+        } else {
+          // Для SHORT: TP = entryPrice * (1 - 0.10) = entryPrice * 0.90
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tpMultiplier = hundred.minus(slTpPercent).div(hundred) as any;
+          finalTakeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+        }
+        this.logger.info(
+          `[${pair}] Автоматическая установка TP: ${finalTakeProfitPrice?.toFixed(8) || 'N/A'} (10% от цены входа ${entryPriceDecimal.toString()})`,
+        );
+      }
+
+      // Обновляем параметры решения для сохранения в БД
+      // Проверяем, что значения установлены (они должны быть установлены после блоков выше)
+      if (finalStopLossPrice === null || finalStopLossPrice === undefined) {
+        throw new Error(
+          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: finalStopLossPrice не установлен после автоматической установки`,
+        );
+      }
+      if (finalTakeProfitPrice === null || finalTakeProfitPrice === undefined) {
+        throw new Error(
+          `[${pair}] КРИТИЧЕСКАЯ ОШИБКА: finalTakeProfitPrice не установлен после автоматической установки`,
+        );
+      }
+
+      decision.parameters.stop_loss_price = finalStopLossPrice;
+      decision.parameters.take_profit_price = finalTakeProfitPrice;
+    }
+
     // --- Шаг 2: Создание SL/TP ордеров ДО транзакции БД ---
     let slOrder: IDecimalOrder | null = null;
     let tpOrder: IDecimalOrder | null = null;
 
     try {
       // Создаем SL
-      if (stop_loss_price !== null && stop_loss_price !== undefined) {
+      if (finalStopLossPrice !== null && finalStopLossPrice !== undefined) {
         try {
-          const slPriceDecimal = new DecimalConstructor(stop_loss_price.toString());
+          const slPriceDecimal = new DecimalConstructor(finalStopLossPrice.toString());
           const slPriceParams = { stopPrice: slPriceDecimal.toNumber() };
 
           slOrder = await this.executionService.createOrderWithRetry(
@@ -573,9 +734,9 @@ export class WorkerService {
       }
 
       // Создаем TP
-      if (take_profit_price !== null && take_profit_price !== undefined) {
+      if (finalTakeProfitPrice !== null && finalTakeProfitPrice !== undefined) {
         try {
-          const tpPriceDecimal = new DecimalConstructor(take_profit_price.toString());
+          const tpPriceDecimal = new DecimalConstructor(finalTakeProfitPrice.toString());
 
           tpOrder = await this.executionService.createOrderWithRetry(
             pair,
@@ -620,7 +781,7 @@ export class WorkerService {
               amountDecimal.toNumber(),
               entryPriceDecimal.toNumber(),
               feeCostDecimal.toNumber(),
-              stop_loss_price !== null && stop_loss_price !== undefined ? stop_loss_price : null,
+              finalStopLossPrice !== null && finalStopLossPrice !== undefined ? finalStopLossPrice : null,
             ],
           );
 
@@ -653,7 +814,7 @@ export class WorkerService {
           if (slOrder) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const slOrderAny = slOrder as any;
-            const slPrice = slOrderAny.price || slOrderAny.stopPrice || stop_loss_price;
+            const slPrice = slOrderAny.price || slOrderAny.stopPrice || finalStopLossPrice;
             const slPriceDecimal = new DecimalConstructor(slPrice.toString());
 
             await client.query(
@@ -676,7 +837,7 @@ export class WorkerService {
           if (tpOrder) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const tpOrderAny = tpOrder as any;
-            const tpPrice = tpOrderAny.price || take_profit_price;
+            const tpPrice = tpOrderAny.price || finalTakeProfitPrice;
             const tpPriceDecimal = new DecimalConstructor(tpPrice.toString());
 
             await client.query(
@@ -700,7 +861,7 @@ export class WorkerService {
             const tslConfigJson = JSON.stringify(trailing_stop_config);
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const slOrderAny = slOrder as any;
-            const slPrice = slOrderAny.price || slOrderAny.stopPrice || stop_loss_price;
+            const slPrice = slOrderAny.price || slOrderAny.stopPrice || finalStopLossPrice;
             const slPriceDecimal = new DecimalConstructor(slPrice.toString());
 
             await client.query(

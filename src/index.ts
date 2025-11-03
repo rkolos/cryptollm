@@ -170,6 +170,7 @@ async function main(): Promise<void> {
       globalState,
       accountStateService,
       exchangeRulesService,
+      exchangeService,
       config,
     );
 

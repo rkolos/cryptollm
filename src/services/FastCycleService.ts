@@ -252,6 +252,7 @@ export class FastCycleService {
         this.globalState,
         this.accountState,
         exchangeRulesService,
+        this.exchangeService,
         this.configService,
       );
 

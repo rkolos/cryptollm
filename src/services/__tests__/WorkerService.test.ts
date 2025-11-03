@@ -7,6 +7,7 @@ import {
   createMockExchangeRulesService,
   createMockDatabaseService,
   createMockGuaranteedOrderExecutionService,
+  createMockExchangeService,
 } from '../../__tests__/mocks/MockServices.js';
 import type { ValidatorService } from '../ValidatorService.js';
 import type { EventBusService } from '../EventBusService.js';
@@ -25,6 +26,7 @@ describe('WorkerService', () => {
   let mockGlobalStateService: GlobalStateService;
   let mockAccountStateService: AccountStateService;
   let mockExchangeRulesService: ReturnType<typeof createMockExchangeRulesService>;
+  let mockExchangeService: ReturnType<typeof createMockExchangeService>;
   let mockConfigService: ConfigService;
 
   beforeEach(() => {
@@ -38,6 +40,7 @@ describe('WorkerService', () => {
     mockExecutionService = createMockGuaranteedOrderExecutionService();
     mockDatabaseService = createMockDatabaseService();
     mockExchangeRulesService = createMockExchangeRulesService();
+    mockExchangeService = createMockExchangeService();
 
     mockEventBus = {
       emitTradeExecuted: vi.fn(),
@@ -76,6 +79,7 @@ describe('WorkerService', () => {
       mockGlobalStateService,
       mockAccountStateService,
       mockExchangeRulesService,
+      mockExchangeService,
       mockConfigService,
     );
   });

@@ -5,6 +5,7 @@ import {
   createMockExchangeRulesService,
   createMockDatabaseService,
   createMockGuaranteedOrderExecutionService,
+  createMockExchangeService,
 } from '../../__tests__/mocks/MockServices.js';
 import type { ValidatorService } from '../ValidatorService.js';
 import type { EventBusService } from '../EventBusService.js';
@@ -25,6 +26,7 @@ describe('WorkerService - Полные тесты всех команд моде
   let mockGlobalStateService: GlobalStateService;
   let mockAccountStateService: AccountStateService;
   let mockExchangeRulesService: ReturnType<typeof createMockExchangeRulesService>;
+  let mockExchangeService: ReturnType<typeof createMockExchangeService>;
   let mockConfigService: ConfigService;
 
   // Вспомогательная функция для создания мокового клиента транзакции
@@ -44,6 +46,7 @@ describe('WorkerService - Полные тесты всех команд моде
     mockExecutionService = createMockGuaranteedOrderExecutionService();
     mockDatabaseService = createMockDatabaseService();
     mockExchangeRulesService = createMockExchangeRulesService();
+    mockExchangeService = createMockExchangeService();
 
     mockEventBus = {
       emitTradeExecuted: vi.fn(),
@@ -82,6 +85,7 @@ describe('WorkerService - Полные тесты всех команд моде
       mockGlobalStateService,
       mockAccountStateService,
       mockExchangeRulesService,
+      mockExchangeService,
       mockConfigService,
     );
 

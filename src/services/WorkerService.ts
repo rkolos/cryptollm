@@ -18,7 +18,7 @@ import type {
   CalculatedAmounts,
   DecimalValue,
 } from '../interfaces/IValidatorTypes.js';
-import type { IDecimalOrder } from '../interfaces/IExchangeService.js';
+import type { IExchangeService, IDecimalOrder } from '../interfaces/IExchangeService.js';
 import { InsufficientFundsError } from '../errors/ExchangeErrors.js';
 import { ValidationError } from '../errors/ValidationError.js';
 import type winston from 'winston';
@@ -42,6 +42,7 @@ export class WorkerService {
   private readonly globalStateService: GlobalStateService;
   private readonly accountStateService: AccountStateService;
   private readonly exchangeRulesService: ExchangeRulesService;
+  private readonly exchangeService: IExchangeService;
   private readonly configService: ConfigService;
 
   private constructor(
@@ -53,6 +54,7 @@ export class WorkerService {
     globalStateService: GlobalStateService,
     accountStateService: AccountStateService,
     exchangeRulesService: ExchangeRulesService,
+    exchangeService: IExchangeService,
     configService: ConfigService,
   ) {
     this.validatorService = validatorService;
@@ -63,6 +65,7 @@ export class WorkerService {
     this.globalStateService = globalStateService;
     this.accountStateService = accountStateService;
     this.exchangeRulesService = exchangeRulesService;
+    this.exchangeService = exchangeService;
     this.configService = configService;
     this.logger = LoggingService.getInstance().getLogger('Worker');
     this.logger.info('WorkerService initialized.');
@@ -77,6 +80,7 @@ export class WorkerService {
     globalStateService: GlobalStateService,
     accountStateService: AccountStateService,
     exchangeRulesService: ExchangeRulesService,
+    exchangeService: IExchangeService,
     configService: ConfigService,
   ): WorkerService {
     if (!WorkerService.instance) {
@@ -89,6 +93,7 @@ export class WorkerService {
         globalStateService,
         accountStateService,
         exchangeRulesService,
+        exchangeService,
         configService,
       );
     }
@@ -895,10 +900,26 @@ export class WorkerService {
         `[${pair}] Закрытие ${positionSide} позиции. Объем позиции: ${fullPositionAmountDecimal.toString()}, Закрывается: ${closeAmountDecimal.toString()} (${amount_percent}%), Сторона ордера: ${closeSide}.`,
       );
 
-      // --- Шаг 2: (Архитектура 7.3) - НЕ отменять ордера ---
-      // Мы НЕ вызываем cancelAllOrders здесь, чтобы избежать "гонок".
-      // Вместо этого мы атомарно удалим их из ActiveOrders (Шаг 4).
-      // "Осиротевшие" ордера на бирже будут очищены "Сверщиком" (SyncEngine 5.1).
+      // --- Шаг 2: Отменяем все открытые ордера для данной пары ---
+      // Это необходимо для спотового трейдинга, где стоп-лосс ордера блокируют токены
+      try {
+        const openOrders = await this.exchangeService.fetchOpenOrders(pair);
+        if (openOrders.length > 0) {
+          this.logger.info(
+            `[${pair}] Найдено ${openOrders.length} открытых ордеров. Отменяем их перед закрытием позиции...`,
+          );
+          const cancelPromises = openOrders.map((order: IDecimalOrder) =>
+            this.executionService.cancelOrderWithRetry(order.id, pair).catch((cancelError) => {
+              this.logger.warn(`[${pair}] Не удалось отменить ордер ${order.id}:`, cancelError);
+            }),
+          );
+          await Promise.all(cancelPromises);
+          this.logger.info(`[${pair}] Все открытые ордера отменены.`);
+        }
+      } catch (error) {
+        this.logger.error(`[${pair}] Ошибка при отмене открытых ордеров:`, error);
+        // Продолжаем выполнение, так как это не критично
+      }
 
       // --- Шаг 3: Создание Market ордера на Закрытие ---
       const closeMarketOrder = await this.executionService.createOrderWithRetry(

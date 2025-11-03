@@ -127,12 +127,12 @@ export class SyncEngineService {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       try {
-        // Таймаут 30 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
+        // Таймаут 60 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
         const reconcilePromise = this.reconcileStateForPair(pair);
         const timeoutPromise = new Promise<void>((_, reject) => {
           setTimeout(() => {
-            reject(new Error(`Таймаут сверки для пары ${pair} (30 секунд)`));
-          }, 30000); // 30 секунд на пару
+            reject(new Error(`Таймаут сверки для пары ${pair} (60 секунд)`));
+          }, 60000); // 60 секунд на пару
         });
 
         await Promise.race([reconcilePromise, timeoutPromise]);
@@ -140,7 +140,7 @@ export class SyncEngineService {
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (errorMessage.includes('Таймаут')) {
           this.logger.warn(
-            `[${pair}] Сверка для пары превысила таймаут (30 секунд). Возможно, очередь занята другой операцией. Продолжаем со следующей парой...`,
+            `[${pair}] Сверка для пары превысила таймаут (60 секунд). Возможно, очередь занята другой операцией. Продолжаем со следующей парой...`,
           );
         } else {
           this.logger.error(`[${pair}] Ошибка при сверке пары:`, error);

@@ -148,8 +148,8 @@ async function clearDatabase(): Promise<void> {
 async function closeAllPositionsAndSellToUSDT() {
   console.log('🚀 Начинаем ПОЛНУЮ ПЕРЕЗАГРУЗКУ системы...\n');
 
-  // === ШАГ 0: ОЧИСТКА ЛОГОВ И БАЗЫ ДАННЫХ ===
-  console.log('📋 ШАГ 0: Очистка логов и базы данных...\n');
+  // === ШАГ 0: ПРЕДВАРИТЕЛЬНАЯ ПОДГОТОВКА ===
+  console.log('📋 ШАГ 0: Предварительная подготовка...\n');
 
   try {
     // Очищаем логи до инициализации сервисов логирования
@@ -158,16 +158,13 @@ async function closeAllPositionsAndSellToUSDT() {
     // Инициализируем ConfigService для доступа к настройкам
     ConfigService.load();
 
-    // Очищаем базу данных
-    await clearDatabase();
-
-    console.log('✅ Очистка завершена!\n');
+    console.log('✅ Подготовка завершена!\n');
   } catch (error) {
-    console.error('❌ Критическая ошибка при очистке:', error);
+    console.error('❌ Критическая ошибка при подготовке:', error);
     process.exit(1);
   }
 
-  // Инициализация сервисов после очистки
+  // Инициализация сервисов
   LoggingService.initialize();
   const logger = LoggingService.getInstance().getLogger('CloseAll');
 
@@ -350,8 +347,18 @@ async function closeAllPositionsAndSellToUSDT() {
       }
     }
 
-    // === ШАГ 3: ФИНАЛЬНАЯ ПРОВЕРКА ===
-    console.log('\n🔍 ШАГ 3: Финальная проверка...\n');
+    // === ШАГ 3: ОЧИСТКА БАЗЫ ДАННЫХ ===
+    console.log('\n🗃️ ШАГ 3: Очистка базы данных...\n');
+    try {
+      await clearDatabase();
+      console.log('✅ База данных очищена!\n');
+    } catch (error) {
+      console.error('❌ Ошибка при очистке базы данных:', error);
+      // Продолжаем, так как основные задачи выполнены
+    }
+
+    // === ШАГ 4: ФИНАЛЬНАЯ ПРОВЕРКА ===
+    console.log('\n🔍 ШАГ 4: Финальная проверка...\n');
 
     await accountStateService.refreshNow();
     const finalAccountState = accountStateService.getAccountState();

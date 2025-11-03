@@ -648,16 +648,22 @@ export class WatcherOrchestratorService {
             }
           }
 
-          // Шаг 6: Пост-Сверка (критично - только если есть решения)
+          // Шаг 6: Пост-Сверка (асинхронно - fire-and-forget, чтобы избежать deadlock)
           if (llmResponse.decisions.length > 0) {
-            this.logger.info(`[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации...`);
-            try {
-              await this.syncEngine.reconcileStateForPair(pair);
-              this.logger.info(`[${pair}] Пост-синхронизация завершена успешно.`);
-            } catch (error) {
-              this.logger.error(`[${pair}] Ошибка при пост-синхронизации:`, error);
-              // Не прерываем выполнение, так как это не критическая ошибка
-            }
+            this.logger.info(
+              `[${pair}] Действия выполнены Worker. Запуск принудительной пост-синхронизации (асинхронно)...`,
+            );
+
+            // АСИНХРОННЫЙ ВЫЗОВ: не ждем завершения, чтобы избежать deadlock с pairActorManager
+            this.syncEngine
+              .reconcileStateForPair(pair)
+              .then(() => {
+                this.logger.info(`[${pair}] Пост-синхронизация завершена успешно.`);
+              })
+              .catch((error) => {
+                this.logger.error(`[${pair}] Ошибка при пост-синхронизации:`, error);
+                // Не критичная ошибка - просто логируем
+              });
           } else {
             this.logger.debug(`[${pair}] Нет решений для исполнения. Пост-синхронизация не требуется.`);
           }

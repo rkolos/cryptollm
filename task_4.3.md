@@ -28,21 +28,34 @@
 
 ### 4.1. Метод `fetchWatchlistOverview(triggeredPair)`
 
-1.  **Фильтрация:** _обязан_ получить полный `watchlist` из `ConfigService` и отфильтровать `triggeredPair`.
-2.  **Параллелизация (Критично):** _обязан_ запустить асинхронный вызов приватного метода (`_fetchSinglePairOverview`) для _каждой_ оставшейся пары и обернуть это в **`Promise.allSettled`**.
-3.  **Обработка `allSettled`:** _обязан_ просмотреть массив результатов `Promise.allSettled`:
-    - Если `result.status === 'fulfilled'`, включить результат в итоговый массив.
-    - Если `result.status === 'rejected'`, залогировать ошибку (`warn`) и включить в итоговый массив элемент с `pair: <ошибка>` и полями `current_price: null`, `rsi_1h: null`.
+1.  **Фильтрация:** _обязан_ получить полный `watchlist` из `ConfigService.getWatchlist()` и отфильтровать `triggeredPair` через `watchlist.filter((pair) => pair !== triggeredPair)`.
+2.  **Проверка пустого списка:** Если после фильтрации список пуст, залогировать `debug` и вернуть пустой массив `[]`.
+3.  **Параллелизация (Критично):** _обязан_ запустить асинхронный вызов приватного метода (`_fetchSinglePairOverview`) для _каждой_ оставшейся пары через `pairsToProcess.map((pair) => this._fetchSinglePairOverview(pair))` и обернуть это в **`Promise.allSettled`**.
+4.  **Обработка `allSettled`:** _обязан_ просмотреть массив результатов `Promise.allSettled`:
+    - Пройти циклом по индексам результатов.
+    - Для каждого результата получить соответствующую пару из `pairsToProcess[i]`.
+    - Если `result.status === 'fulfilled'`, включить `result.value` в итоговый массив.
+    - Если `result.status === 'rejected'`, залогировать ошибку (`warn`) с указанием пары и включить в итоговый массив элемент с `pair`, `current_price: null`, `rsi_1h: null`.
+5.  **Обработка ошибок:** Весь метод _обязан_ быть обернут в `try/catch`. При фатальной ошибке логировать `error` и вернуть пустой массив `[]`.
+6.  **Логирование:** Залогировать `debug` с количеством обработанных пар и финальным количеством элементов в результате.
 
 ### 4.2. Метод `_fetchSinglePairOverview(pair)`
 
 1.  **Логика:** Этот метод _обязан_ работать с одной парой и _обязан_ использовать `Promise.all` для параллельного получения цены и свечей:
-    - `exchangeService.fetchTicker(pair)`
-    - `marketDataService.fetchOHLCV(pair, '1h', 50)` (50 свечей достаточно для `RSI(14)`).
+    - `this.exchangeService.fetchTicker(pair)`
+    - `this.marketDataService.fetchOHLCV(pair, '1h', undefined, 50)` (50 свечей достаточно для `RSI(14)`).
 
-2.  **Расчет RSI (Критично):** Полученный `OHLCV[]` _обязан_ быть немедленно передан в `taEngineService.getAnalysis(ohlcv, [])`.
-3.  **Извлечение:** _обязан_ извлечь `ticker.last` (цена) и `analysis.rsi` (RSI).
-4.  **Обработка `null`:** _обязан_ возвращать `Decimal | null` для каждого поля.
+2.  **Извлечение цены:** Из полученного `ticker` извлечь `ticker.last` (цена) и сохранить в `currentPrice`. Если `ticker.last` отсутствует, установить `currentPrice = null`.
+
+3.  **Расчет RSI (Критично):** 
+    - Проверить, что `ohlcv.length > 0`.
+    - Если массив не пуст, передать `ohlcv` в `this.taEngineService.getAnalysis(ohlcv, [])`.
+    - Извлечь `analysis.rsi` и сохранить в `rsi1h`.
+    - Если массив пуст, установить `rsi1h = null`.
+
+4.  **Возврат:** Вернуть объект `WatchlistOverviewItem` с полями `pair`, `current_price: currentPrice`, `rsi_1h: rsi1h`.
+
+5.  **Обработка ошибок:** Метод _обязан_ быть обернут в `try/catch`. При ошибке логировать `warn` с указанием пары и вернуть объект с `pair`, `current_price: null`, `rsi_1h: null`.
 
 ## 5\. Критерии Приемки (Acceptance Criteria)
 
@@ -52,7 +65,7 @@
 
 2.  Service
 
-    `WatchlistOverviewService` создан как Singleton и корректно получает все 4 необходимые зависимости через DI.
+    `WatchlistOverviewService` создан как Singleton с методом `getInstance(configService, exchangeService, marketDataService, taEngineService)` и корректно получает все 4 необходимые зависимости через DI в конструкторе.
 
 3.  Filtering
 
@@ -72,4 +85,12 @@
 
 7.  Robustness
 
-    Сервис _обязан_ логировать ошибки отдельных пар (result.status === 'rejected') и возвращать для этих пар элемент с полями `null`, не прерывая выполнение.
+    Сервис _обязан_ логировать ошибки отдельных пар (`result.status === 'rejected'`) и возвращать для этих пар элемент с полями `null`, не прерывая выполнение. Метод `_fetchSinglePairOverview` также обрабатывает ошибки и возвращает элемент с `null` полями. Весь метод `fetchWatchlistOverview` обернут в `try/catch` для обработки фатальных ошибок.
+
+8.  EmptyList
+
+    Если после фильтрации список пар пуст, метод возвращает пустой массив без попыток сбора данных.
+
+9.  Logging
+
+    Метод логирует `debug` сообщения о количестве обрабатываемых пар и финальном количестве элементов в результате.

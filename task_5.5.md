@@ -49,48 +49,52 @@
         - Получить `const state = this.accountStateService.getAccountState();`
         - Получить `const triggerConditions = state.llmTriggers.get(pair);`
         - **Если `!triggerConditions`:** `return;` (Для этой пары нет триггеров, выходим).
-        - Получить `const currentPrice = new Decimal(ticker.last);`
+        - Проверить, изменились ли триггеры для этой пары через `_hashTriggers(triggerConditions)` и сравнить с `triggerHashes.get(pair)`. Если изменились, очистить сработавшие триггеры через `_clearTriggeredTriggersForPair(pair)`.
+        - Получить `const currentPriceDecimal = ticker.last as any;`
+        - Получить `const currentPrice = new DecimalConstructor(currentPriceDecimal.toString());`
         - **Вызвать приватный обработчик логики:** `const triggeredCondition = this._findPriceTrigger(triggerConditions, currentPrice);`
         - **Если `triggeredCondition`:**
+          - Создать уникальный ключ через `_getTriggerKey(pair, triggeredCondition)`.
+          - Проверить, не срабатывал ли уже этот триггер через `triggeredTriggers.has(triggerKey)`. Если да, залогировать `debug` и выйти (`return`).
           - `// Триггер сработал. Проверяем "предохранитель" (Задача 5.5).`
-          - Получить `const openLimitOrder = this._findOpenLimitOrder(state.activeOrders, pair);`
+          - Получить `const openLimitOrder = this._findOpenLimitOrder(state.open_orders, pair);`
           - **Если `openLimitOrder`:**
-            - `this.logger.debug(`(PriceHandler) \[${pair}\] Price trigger ${triggeredCondition.value} hit, but ignored due to active OPEN_LIMIT order.`);`
+            - `this.logger.debug(`(PriceHandler) [${pair}] Price trigger ${triggeredCondition.value} hit, but ignored due to active OPEN_LIMIT order.`);`
             - `return;` (Игнорируем, `SyncEngine` (5.1.2) справится).
 
+          - Пометить триггер как сработавший ПЕРЕД вызовом оркестратора: `this.triggeredTriggers.add(triggerKey);`
           - `// "Предохранитель" не сработал, передаем управление Оркестратору`
-          - `this.logger.info(`(PriceHandler) \[${pair}\] Price trigger hit: ${currentPrice} ${triggeredCondition.condition} ${triggeredCondition.value}. Calling Orchestrator.`);`
+          - `this.logger.info(`(PriceHandler) [${pair}] Price trigger hit: ${currentPrice.toString()} ${triggeredCondition.condition} ${triggeredCondition.value}. Calling Orchestrator.`);`
           - **\_ (Задача 9.3) Вызов "Актора" (Fire-and-Forget): \_**
-          - `this.pairActorManager.execute(pair, async () => { ... })` (Вызвать _без_ `await`):
-            - `(async () => {`
-            - `await this.orchestrator.executeOrchestration(pair, "Price Trigger Hit");`
-            - `});`
+          - `this.pairActorManager.execute(pair, async () => { ... }).catch((e) => { ... })` (Вызвать _без_ `await`):
+            - Внутри актора: `await this.orchestrator.executeOrchestration(pair, 'Price Trigger Hit');`
+            - В `.catch()`: залогировать `error` об ошибке актора.
 
-          - `.catch((e) => { ... (Логировать ошибку "актора", Задача 9.1) ... });`
-
-      - **`} catch (e: any) {`**
-        - `this.logger.error(`(PriceHandler) \[${ticker.symbol}\] КРИТИЧЕСКИЙ СБОЙ: ${e.message}`, e.stack);`
+      - **`} catch (error) {`**
+        - `this.logger.error(`(PriceHandler) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ: ${String(error)}`, error);`
         - `// (Не бросаем ошибку, чтобы не "убить" WS-цикл)`
 
-      - **`}`**
+      - **`}``
 
 ### 4.4. Приватный Метод `private _findPriceTrigger(conditions, currentPrice)`
 
 - **Нюанс реализации:** Чистая, синхронная функция, использующая `decimal.js`.
 - **Логика:**
-  1.  Найти _первый_ `condition` в `conditions`, где `condition.type === 'price'`.
-  2.  Проверить, используя `decimal.js`:
-      - `if (condition.condition === 'below' && currentPrice.lessThan(condition.value)) return condition;`
-      - `if (condition.condition === 'above' && currentPrice.greaterThan(condition.value)) return condition;`
-
-  3.  `return null;` (Триггер не сработал).
+  1.  Для каждого `condition` в `conditions`:
+      - Если `condition.type !== 'price'`, продолжить (`continue`).
+      - Преобразовать `condition.value` в `Decimal`: `const conditionValue = new DecimalConstructor(condition.value);`
+      - Если `condition.condition === 'below' && currentPrice.lessThan(conditionValue)`, вернуть `condition`.
+      - Если `condition.condition === 'above' && currentPrice.greaterThan(conditionValue)`, вернуть `condition`.
+  2.  `return null;` (Триггер не сработал).
 
 ### 4.5. Приватный Метод `private _findOpenLimitOrder(activeOrders, pair)`
 
 - **Нюанс реализации:** Чистая, синхронная функция.
 - **Логика:**
-  1.  Найти _первый_ `order` в `activeOrders`, где `order.pair === pair` И `order.type === 'limit_open'` И `order.status === 'open'`.
-  2.  `return order || null;`
+  1.  Для каждого `order` в `activeOrders`:
+      - Преобразовать `order` в типизированный объект (с использованием `as any`).
+      - Если `order.pair === pair` И `order.type === 'limit_open'` И (`order.status === 'open'` ИЛИ `order.status === undefined`), вернуть `order`.
+  2.  `return null;` (OPEN_LIMIT ордер не найден).
 
 ## 5\. Критерии Приемки (Acceptance Criteria)
 
@@ -100,10 +104,22 @@
 
 2.  **\[Dependency\]** `AccountStateService` (4.5) _обновлен_ для включения `LLM_Triggers` в свой `in-memory` кэш, доступный через `getAccountState()`.
 3.  **\[API\]** `handleTicker(ticker)` _не_ является `async` и _не_ содержит `await` верхнего уровня.
-4.  **\[Core (Cache)\]** `handleTicker` _корректно_ и _синхронно_ получает `llmTriggers` И `activeOrders` из `this.accountStateService.getAccountState()`.
+4.  **\[Core (Cache)\]** `handleTicker` _корректно_ и _синхронно_ получает `llmTriggers` И `open_orders` из `this.accountStateService.getAccountState()`.
 5.  **\[Core (Logic)\]** Реализован приватный метод `_findPriceTrigger`, который _корректно_ использует `decimal.js` для сравнения цен.
 6.  **\[Core (Logic - 5.5)\]** Реализован приватный метод `_findOpenLimitOrder` (предохранитель).
 7.  **\[Core (Logic - 5.5)\]** `handleTicker` _корректно_ проверяет `if (openLimitOrder)` и _игнорирует_ триггер (делает `return`), если `OPEN_LIMIT` найден.
 8.  **\[Concurrency (Задача 9.3)\]** Если триггер сработал (и `OPEN_LIMIT` не найден), `handleTicker` _корректно_ вызывает `this.pairActorManager.execute()` _без_ `await` (в режиме "fire-and-forget").
 9.  **\[Concurrency (Задача 9.3)\]** Вызов `pairActorManager.execute` _корректно_ имеет `.catch()` для обработки ошибок "актора".
-10. **\[Actor\]** _Внутри_ "актора" _корректно_ вызывается `await this.orchestrator.executeOrchestration()`.
+10. **\[Actor\]** _Внутри_ "актора" _корректно_ вызывается `await this.orchestrator.executeOrchestration(pair, 'Price Trigger Hit')`.
+
+11. **\[Deduplication\]** Реализован механизм отслеживания сработавших триггеров через `Set<string>` (`triggeredTriggers`) для предотвращения повторных срабатываний.
+
+12. **\[Deduplication\]** Реализован метод `_getTriggerKey(pair, condition)` для создания уникального ключа триггера.
+
+13. **\[Deduplication\]** Реализован метод `_clearTriggeredTriggersForPair(pair)` для очистки сработавших триггеров при изменении триггеров для пары.
+
+14. **\[Hash\]** Реализован метод `_hashTriggers(conditions)` для создания хеша триггеров и обнаружения изменений.
+
+15. **\[Hash\]** `handleTicker` проверяет изменение триггеров и очищает сработавшие триггеры при изменении.
+
+16. **\[FindOpenLimit\]** Метод `_findOpenLimitOrder` проверяет `order.status === 'open'` ИЛИ `order.status === undefined`.

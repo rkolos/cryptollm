@@ -11,7 +11,7 @@
 ## 2\. Зависимости Задачи
 
 - **`ValidatorService.ts` (6.4):** (Модифицируемый) Файл, в который добавляется новая логика.
-- **`ExchangeRulesService` (3.2):** (Зависимость) Используется для получения правил `taker` (комиссия).
+- **`ExchangeRulesService` (3.2):** (Зависимость) Используется для получения правил через `getRules(pair)` (`takerFee`).
 - **`decimal.js` (1.2):** (Зависимость)
 - **Типы (Types):** `CalculatedAmounts`.
 
@@ -29,11 +29,12 @@
     export class ValidatorService {
         // ... (instance, logger, exchangeRules, constructor, getInstance из 6.1)
 
-        public validateAndCalculate(
+        public validateDecision(
             decision: LLMDecision,
             accountState: AccountState,
+            strategyContext: StrategyContext,
             marketData: MarketData,
-            riskRules: RiskRules
+            _exchangeRules: IMarketRules
         ): CalculatedAmounts {
 
             // ... (Код Уровня 1, 2, 3 и 'return' для не-OPEN действий из 6.6)
@@ -111,36 +112,36 @@
          */
         private _validateFeeVsRisk(
             pair: string,
-            roundedAmountUsd: Decimal,
-            usdAtRisk: Decimal
+            roundedAmountUsd: DecimalValue,
+            usdAtRisk: DecimalValue
         ): void {
-
             // 1. Получаем комиссию 'taker'
-            const fees = this.exchangeRules.getFees(pair);
-            if (!fees || typeof fees.taker !== 'number') {
-                this.logger.error(`[${pair}] НЕ УДАЛОСЬ получить правила комиссий (taker fee).`);
-                throw new ValidationError(`[${pair}] Критическая ошибка: Отсутствуют правила комиссий (taker fee)`);
-            }
-
-            const takerFee = new Decimal(fees.taker); // (e.g., 0.001 для 0.1%)
+            const rules = this.exchangeRulesService.getRules(pair);
+            const takerFeeDecimal = rules.takerFee as any;
+            const roundedAmountUsdDecimal = roundedAmountUsd as any;
+            const usdAtRiskDecimal = usdAtRisk as any;
 
             // 2. Рассчитываем комиссию за "туда-обратно" (round-trip)
             // (Мы используем 'roundedAmountUsd' для расчета, т.к. это реальная стоимость ордера)
 
             // one_way_fee = roundedAmountUsd * takerFee
-            const oneWayFeeUsd = roundedAmountUsd.times(takerFee);
+            const oneWayFeeUsd = roundedAmountUsdDecimal.mul(takerFeeDecimal) as DecimalValue;
             // round_trip_fee = one_way_fee * 2
-            const roundTripFeeUsd = oneWayFeeUsd.times(2);
+            const oneWayFeeUsdDecimal = oneWayFeeUsd as any;
+            const two = new DecimalConstructor(2);
+            const roundTripFeeUsd = oneWayFeeUsdDecimal.mul(two) as DecimalValue;
 
-            this.logger.debug(`[${pair}] Проверка Комиссии: Риск $${usdAtRisk.toFixed(4)} vs Комиссия $${roundTripFeeUsd.toFixed(4)}`);
+            const roundTripFeeUsdDecimal = roundTripFeeUsd as any;
+            this.logger.debug(
+                `[${pair}] Проверка Комиссии: Риск $${usdAtRiskDecimal.toFixed(4)} vs Комиссия $${roundTripFeeUsdDecimal.toFixed(4)}`,
+            );
 
             // 3. (Критично) Проверяем, что Риск > Комиссии
-            // if (usdAtRisk <= roundTripFeeUsd)
-            if (usdAtRisk.lessThanOrEqualTo(roundTripFeeUsd)) {
+            if (usdAtRiskDecimal.lte(roundTripFeeUsdDecimal)) {
                 throw new ValidationError(
-                    `[${pair}] Сделка невыгодна: Потенциальный убыток (Риск) $${usdAtRisk.toFixed(4)} ` +
-                    `меньше или равен гарантированным комиссиям $${roundTripFeeUsd.toFixed(4)}. ` +
-                    `Увеличьте дистанцию до стопа.`
+                    `[${pair}] Сделка невыгодна: Потенциальный убыток (Риск) $${usdAtRiskDecimal.toFixed(4)} ` +
+                        `меньше или равен гарантированным комиссиям $${roundTripFeeUsdDecimal.toFixed(4)}. ` +
+                        `Увеличьте дистанцию до стопа.`,
                 );
             }
         }
@@ -150,12 +151,10 @@
 
 _(Критерии 1-7 из Задачи 6.4 остаются в силе)_
 
-8.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validateFeeVsRisk`.
-9.  **\[Service\]** `_validateExchangeAndBalanceRules` (из 6.4) теперь вызывает `_validateFeeVsRisk` в качестве своего последнего шага.
-10. **\[Logic (Критично)\]** `_validateFeeVsRisk` вызывает `this.exchangeRules.getFees(pair)` и бросает `ValidationError`, если `fees.taker` не найден.
-
-11. **\[Logic\]** `_validateFeeVsRisk` корректно рассчитывает `roundTripFeeUsd`, используя `roundedAmountUsd` (из 6.6) и `takerFee`.
-
-12. **\[Logic (Критично)\]** `_validateFeeVsRisk` бросает `ValidationError` с информативным сообщением, если `usdAtRisk` (из 6.2) **меньше или равен** `roundTripFeeUsd`.
-
-13. **\[Logic\]** Все расчеты и сравнения комиссий выполняются с использованием `decimal.js`.
+8.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validateFeeVsRisk(pair, roundedAmountUsd, usdAtRisk)`, который принимает `DecimalValue` типы.
+9.  **\[Service\]** `_validateExchangeAndBalanceRules` (из 6.4) теперь вызывает `_validateFeeVsRisk(pair, roundedAmountUsd, usdAtRisk)` в качестве своего последнего шага.
+10. **\[Logic (Критично)\]** `_validateFeeVsRisk` вызывает `this.exchangeRulesService.getRules(pair)` и получает `rules.takerFee` напрямую из объекта rules.
+11. **\[Logic\]** `_validateFeeVsRisk` корректно рассчитывает `roundTripFeeUsd`, используя `roundedAmountUsd.mul(takerFee)` для `oneWayFeeUsd` и `oneWayFeeUsd.mul(2)` для `roundTripFeeUsd` через методы `Decimal`.
+12. **\[Debug\]** `_validateFeeVsRisk` логирует `debug` сообщение с детальной информацией о проверке (Риск vs Комиссия).
+13. **\[Logic (Критично)\]** `_validateFeeVsRisk` бросает `ValidationError` с информативным сообщением на русском языке, если `usdAtRisk.lte(roundTripFeeUsd)`.
+14. **\[Logic\]** Все расчеты и сравнения комиссий выполняются с использованием `decimal.js` и методов `Decimal` (`.mul()`, `.lte()`).

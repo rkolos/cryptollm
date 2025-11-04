@@ -11,7 +11,9 @@
 1.  **Асинхронная Инициализация (Критично):** `DatabaseService` **не должен** быть простым Singleton. Мы _обязаны_ реализовать асинхронный `public static async initialize()` метод.
 2.  **Причина:** Этот `initialize()` _обязан_ не просто создать `Pool`, но и "пропинговать" (`SELECT NOW()`) базу данных. Если БД недоступна при старте, `initialize()` _обязан_ "уронить" приложение (`process.exit(1)`). Это предотвращает запуск "полуживого" бота, который не сможет сохранять свое состояние.
 3.  **Атомарность (Критично):** `WorkerService` (Эпик 7) _обязан_ выполнять свои операции (e.g., `INSERT ActivePosition` + `DELETE ActiveOrders`) атомарно. `DatabaseService` _обязан_ предоставить `executeInTransaction(callback)` helper, который гарантирует `BEGIN`, `COMMIT` / `ROLLBACK` и `client.release()` (`finally`).
-4.  **Graceful Shutdown:** Сервис _обязан_ предоставить `async closePool()` для `index.ts` (Задача 8.1.1), чтобы корректно закрыть все соединения с БД при остановке.
+4.  **Graceful Shutdown:** Сервис _обязан_ предоставить `async closePool()` для `index.ts` (Задача 8.1.1), чтобы корректно закрыть все соединения с БД при остановке. Метод должен дождаться завершения всех активных операций (запросов и транзакций) перед закрытием пула, с таймаутом ожидания (например, 30 секунд).
+5.  **Отслеживание Операций:** Сервис должен отслеживать количество активных операций (`activeOperationsCount`) для корректного graceful shutdown. Все методы `query()` и `executeInTransaction()` должны инкрементировать счетчик при начале и декрементировать при завершении.
+6.  **Защита от Использования После Закрытия:** Сервис должен предотвращать выполнение запросов после закрытия пула через флаг `isPoolClosed` и проверку `closePoolPromise`.
 
 ## 3\. Зависимости Задачи
 
@@ -32,11 +34,16 @@
 2.  **Нюанс реализации (Критично):**
     - Этот метод _обязан_ вызываться _один_ раз в `index.ts`.
     - Он _обязан_ получить `dbConfig` из `ConfigService.getInstance()`.
-    - Он _обязан_ создать `new Pool(...)` с настройками из `dbConfig` (и оптимальными `max`, `idleTimeoutMillis`).
+    - Он _обязан_ создать `new Pool(...)` с настройками из `dbConfig` и оптимальными параметрами:
+      - `max: 20` (максимум соединений в пуле)
+      - `idleTimeoutMillis: 30000` (30 секунд до закрытия неактивного соединения)
+      - `connectionTimeoutMillis: 2000` (2 секунды таймаут на подключение)
+    - Он _обязан_ проверить, что `instance` еще не создан (если уже создан, выбросить ошибку).
     - Он _обязан_ (в `try/catch`):
-      1.  Выполнить `await pool.query('SELECT NOW()')` для проверки соединения.
-      2.  В случае успеха: создать `this.instance = new DatabaseService(pool)` и залогировать `info`.
-      3.  В случае _ошибки_: залогировать `FATAL`, вызвать `process.exit(1)`.
+      1.  Измерить время выполнения через `Date.now()`.
+      2.  Выполнить `await pool.query('SELECT NOW()')` для проверки соединения.
+      3.  В случае успеха: создать `this.instance = new DatabaseService(pool)` и залогировать `info` с временем подключения в миллисекундах.
+      4.  В случае _ошибки_: залогировать `FATAL`, вызвать `await pool.end()` для освобождения ресурсов, затем `process.exit(1)`.
 
 ### 4.3. Получение Экземпляра (Метод `getInstance`)
 
@@ -50,33 +57,48 @@
 
 1.  **Логика:** Разработчик _обязан_ реализовать `public async query(text: string, params: any[] = []): Promise<QueryResult<any>>`.
 2.  **Нюанс реализации:**
+    - Перед выполнением проверить, не закрыт ли пул (`isPoolClosed`) и дождаться завершения `closePoolPromise`, если он установлен.
+    - Инкрементировать `activeOperationsCount` в начале.
     - Это простой "wrapper" над `this.pool.query()`.
-    - Он _обязан_ логировать запрос (с `debug`) и его длительность (в `ms`).
-    - Он _обязан_ логировать `error` в `catch` блоке, _прежде_ чем `throw e;` (перебросить ошибку).
+    - Он _обязан_ логировать запрос (с `debug`, первые 100 символов) и его длительность (в `ms`).
+    - Он _обязан_ логировать количество возвращенных строк (`rowCount`).
+    - Он _обязан_ логировать `error` в `catch` блоке, обрабатывать ошибки закрытого пула, _прежде_ чем `throw e;` (перебросить ошибку).
+    - В блоке `finally` декрементировать `activeOperationsCount` и уведомить `closePoolResolve`, если все операции завершены.
 
 ### 4.5. Метод `executeInTransaction()` (Атомарные Операции - Критично)
 
 1.  **Логика:** Разработчик _обязан_ реализовать `public async executeInTransaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T>`.
 2.  **Нюанс реализации:**
+    - Перед выполнением проверить, не закрыт ли пул (`isPoolClosed`) и дождаться завершения `closePoolPromise`, если он установлен.
+    - Инкрементировать `activeOperationsCount` в начале.
     - Этот helper _обязан_ следовать _строгой_ последовательности:
-    - `const client = await this.pool.connect();`
+    - `let client: PoolClient | null = null;`
     - `try {`
-    - `await client.query('BEGIN');`
+    - `client = await this.pool.connect();`
+    - `await client.query('BEGIN');` с логированием `debug` ("Transaction client acquired. Beginning transaction...").
     - `const result: T = await callback(client);` (Выполнение `Worker`\-ом своей логики).
-    - `await client.query('COMMIT');`
+    - `await client.query('COMMIT');` с логированием `debug` ("Transaction COMMITTED.").
     - `return result;`
     - `} catch (e) {`
-    - `await client.query('ROLLBACK');`
+    - Обработать ошибки закрытого пула.
+    - Если `client` существует, выполнить `await client.query('ROLLBACK')` в `try/catch` (ROLLBACK может также упасть). Логировать `error` ("Transaction ROLLED BACK due to error:", error).
     - `throw e;`
     - `} finally {`
-    - `client.release();` (Критично: _всегда_ освобождать клиента).
+    - Если `client` существует, выполнить `client.release()` в `try/catch` (release может упасть, если пул закрыт). Логировать `debug` ("Transaction client released.") или `error` при ошибке.
+    - Декрементировать `activeOperationsCount` и уведомить `closePoolResolve`, если все операции завершены.
     - `}`
-    - Он _обязан_ логировать `debug` ("Transaction client acquired..."), `debug` ("Transaction COMMITTED.") и `error` ("Transaction ROLLED BACK...").
 
 ### 4.6. Метод `closePool()` (Graceful Shutdown)
 
 1.  **Логика:** Разработчик _обязан_ реализовать `public async closePool(): Promise<void>`.
-2.  **Нюанс реализации:** Этот метод _обязан_ вызвать `await this.pool.end()` для корректного закрытия всех соединений.
+2.  **Нюанс реализации:**
+    - Метод должен проверить, не закрыт ли пул уже (`isPoolClosed`). Если закрыт, залогировать `warn` и вернуться.
+    - Установить `isPoolClosed = true` для предотвращения новых операций.
+    - Если есть активные операции (`activeOperationsCount > 0`), создать `Promise` (`closePoolPromise`), который разрешится, когда счетчик достигнет 0.
+    - Ожидать завершения всех операций с таймаутом (например, 30 секунд) через `Promise.race()`.
+    - После завершения всех операций или таймаута вызвать `await this.pool.end()` для корректного закрытия всех соединений.
+    - Залогировать `info` ("Database connection pool closed.") или `error` при ошибке.
+    - Очистить `closePoolPromise` и `closePoolResolve` в `finally`.
 
 ### 4.7. Интеграция в `index.ts` (Задача 8.1)
 
@@ -118,8 +140,12 @@
 
 8.  Logic:Shutdown
 
-    `closePool()` успешно вызывает `pool.end()`.
+    `closePool()` успешно дожидается завершения всех активных операций (с таймаутом) и вызывает `pool.end()`. Метод идемпотентен (можно вызывать несколько раз безопасно).
 
 9.  Интеграция
 
     `index.ts` (Задача 8.1) обновлен, `main()` является `async`, и `await DatabaseService.initialize()` вызывается _до_ инициализации других сервисов, зависящих от БД.
+
+10. Graceful Shutdown
+
+    При вызове `closePool()` все активные запросы и транзакции завершаются перед закрытием пула. Новые запросы после установки `isPoolClosed` отклоняются с ошибкой.

@@ -624,10 +624,12 @@
         }
 
         // (НОВОЕ в 7.3) - Заглушка для Задачи 7.3.1
-        private async _handleCloseLimitPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async _handleCloseLimitPosition(
+            decision: LLMDecision,
+            _validationResult: CalculatedAmounts
+        ): Promise<void> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов _handleCloseLimitPosition...`);
             // (Логика Задачи 7.3.1 будет здесь)
-            return null;
         }
 
         private async handleModifyPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {

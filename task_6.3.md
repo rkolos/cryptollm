@@ -12,7 +12,7 @@
 
 - **`ValidatorService.ts` (6.2):** (Модифицируемый) Файл, в который добавляется новая логика.
 - **`decimal.js` (1.2):** (Критическая Зависимость) Используется для **всех** финансовых расчетов.
-- **Типы (Types):** `AccountState`, `RiskRules`.
+- **Типы (Types):** `AccountState`, `StrategyContext` (вместо `RiskRules`).
 
 ## 3\. Описание и Нюансы Реализации
 
@@ -28,11 +28,12 @@
     export class ValidatorService {
         // ... (instance, logger, exchangeRules, constructor, getInstance из 6.1)
 
-        public validateAndCalculate(
+        public validateDecision(
             decision: LLMDecision,
             accountState: AccountState,
+            strategyContext: StrategyContext,
             marketData: MarketData,
-            riskRules: RiskRules
+            _exchangeRules: IMarketRules
         ): CalculatedAmounts {
 
             this.logger.debug(`[${decision.pair}] Запуск валидации для action: ${decision.action}...`);
@@ -57,7 +58,7 @@
             );
 
             // === УРОВЕНЬ 3 (Эта Задача: 6.3) ===
-            this._validatePortfolioRisk(usdAtRisk, accountState, riskRules);
+            this._validatePortfolioRisk(usdAtRisk, accountState, strategyContext);
 
             // === УРОВЕНЬ 4 (Задачи 6.6, 6.4, 6.5) ===
             // const { roundedAmountCoin, roundedAmountUsd } = this._validatePrecisionAndExchangeRules(
@@ -91,55 +92,56 @@
          * @throws {ValidationError}
          */
         private _validatePortfolioRisk(
-            usdAtRisk: Decimal,
+            usdAtRisk: DecimalValue,
             accountState: AccountState,
-            riskRules: RiskRules
+            strategyContext: StrategyContext
         ): void {
+            const riskRules = strategyContext.risk_rules;
+            // Использовать toDecimal() для преобразования total_portfolio_value_usdt
+            const totalValueDecimal = accountState.total_portfolio_value_usdt as any;
+            const zero = new DecimalConstructor(0);
 
-            const totalValue = new Decimal(accountState.total_portfolio_value_usdt);
-            if (totalValue.isZero()) {
-                // Предотвращение деления на ноль, если портфель пуст
-                this.logger.warn("Total portfolio value is 0. Пропуск проверки общего риска.");
+            if (totalValueDecimal.isZero() || totalValueDecimal.eq(zero)) {
+                this.logger.warn('Total portfolio value is 0. Skipping total portfolio risk check.');
                 return;
             }
 
-            let totalCurrentRiskUsd = new Decimal(0);
+            // Суммируем риск существующих позиций
+            let totalCurrentRiskUsd = new DecimalConstructor(0) as any;
 
-            // 1. Суммируем риск *существующих* позиций
             for (const pos of accountState.open_positions) {
-                // (Критично) Убеждаемся, что данные из БД корректны
                 if (pos.average_entry_price && pos.stop_loss_price && pos.amount) {
-                    const entry = new Decimal(pos.average_entry_price);
-                    const stop = new Decimal(pos.stop_loss_price);
-                    const amount = new Decimal(pos.amount);
+                    const entryDecimal = pos.average_entry_price as any;
+                    const stopDecimal = pos.stop_loss_price as any;
+                    const amountDecimal = pos.amount as any;
 
-                    // pos_risk_usd = abs(pos.average_entry_price - pos.stop_loss_price) * pos.amount
-                    const posRiskUsd = entry.sub(stop).abs().times(amount);
-                    totalCurrentRiskUsd = totalCurrentRiskUsd.plus(posRiskUsd);
+                    // pos_risk_usd = abs(entry - stop) * amount
+                    const posRiskUsd = entryDecimal.sub(stopDecimal).abs().mul(amountDecimal) as any;
+                    totalCurrentRiskUsd = totalCurrentRiskUsd.add(posRiskUsd);
                 }
             }
 
-            // 2. Рассчитываем % риска существующих позиций
+            // Рассчитываем % риска существующих позиций
             // total_current_risk_percent = (totalCurrentRiskUsd / total_value) * 100
-            const totalCurrentRiskPercent = totalCurrentRiskUsd.div(totalValue).times(100);
+            const hundred = new DecimalConstructor(100);
+            const totalCurrentRiskPercent = totalCurrentRiskUsd.div(totalValueDecimal).mul(hundred) as any;
 
-            // 3. Рассчитываем % риска *новой* сделки
+            // Рассчитываем % риска новой сделки
             // new_trade_risk_percent = (usd_at_risk / total_value) * 100
-            const newTradeRiskPercent = usdAtRisk.div(totalValue).times(100);
+            const usdAtRiskDecimal = usdAtRisk as any;
+            const newTradeRiskPercent = usdAtRiskDecimal.div(totalValueDecimal).mul(hundred) as any;
 
-            // 4. Сравниваем сумму с лимитом
-            const maxTotalRiskPercent = new Decimal(riskRules.max_total_portfolio_risk_percent);
-            const projectedTotalRiskPercent = totalCurrentRiskPercent.plus(newTradeRiskPercent);
+            // Сравниваем сумму с лимитом
+            const maxTotalRiskPercent = this.toDecimal(riskRules.max_total_portfolio_risk_percent) as any;
+            const projectedTotalRiskPercent = totalCurrentRiskPercent.add(newTradeRiskPercent) as any;
 
-            this.logger.debug(`Проверка Общего Риска: Текущий ${totalCurrentRiskPercent.toFixed(2)}% + Новый ${newTradeRiskPercent.toFixed(2)}% = Прогноз ${projectedTotalRiskPercent.toFixed(2)}% (Лимит: ${maxTotalRiskPercent}%)`);
+            this.logger.debug(
+                `Portfolio Risk Check: Current ${totalCurrentRiskPercent.toFixed(2)}% + New ${newTradeRiskPercent.toFixed(2)}% = Projected ${projectedTotalRiskPercent.toFixed(2)}% (Limit: ${maxTotalRiskPercent.toFixed(2)}%)`,
+            );
 
-            // if (projectedTotalRiskPercent > maxTotalRiskPercent)
-            if (projectedTotalRiskPercent.greaterThan(maxTotalRiskPercent)) {
+            if (projectedTotalRiskPercent.gt(maxTotalRiskPercent)) {
                 throw new ValidationError(
-                    `Новая сделка (риск ${newTradeRiskPercent.toFixed(2)}%) + ` +
-                    `Открытые позиции (риск ${totalCurrentRiskPercent.toFixed(2)}%) = ` +
-                    `${projectedTotalRiskPercent.toFixed(2)}%. ` +
-                    `Это превышает max_total_portfolio_risk ${maxTotalRiskPercent}%.`
+                    `New trade (risk ${newTradeRiskPercent.toFixed(2)}%) + Open positions (risk ${totalCurrentRiskPercent.toFixed(2)}%) = ${projectedTotalRiskPercent.toFixed(2)}%. This exceeds max_total_portfolio_risk_percent (${maxTotalRiskPercent.toFixed(2)}%).`,
                 );
             }
         }
@@ -149,10 +151,11 @@
 
 ## 4\. Критерии Приемки (Acceptance Criteria)
 
-1.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validatePortfolioRisk`.
-2.  **\[Logic (Критично)\]** `_validatePortfolioRisk` выполняет **все** расчеты (суммирование рисков, расчет процентов) с использованием `decimal.js`.
-3.  **\[Logic\]** `_validatePortfolioRisk` корректно итерирует `accountState.open_positions` и рассчитывает `posRiskUsd` для каждой позиции, используя формулу `abs(entry - stop) * amount`.
-4.  **\[Logic\]** `_validatePortfolioRisk` корректно рассчитывает `totalCurrentRiskPercent` (суммарный риск _открытых_ позиций) и `newTradeRiskPercent` (риск _новой_ сделки).
-5.  **\[Logic\]** `_validatePortfolioRisk` бросает `ValidationError` с информативным сообщением, если `projectedTotalRiskPercent` (сумма) > `riskRules.max_total_portfolio_risk_percent`.
-6.  **\[Logic\]** `_validatePortfolioRisk` корректно обрабатывает случай, когда `total_portfolio_value_usdt` равен 0 (пропускает проверку).
-7.  **\[Service\]** `validateAndCalculate` (главный метод) теперь вызывает `_validatePortfolioRisk` (после `_calculatePositionSizing`) для `OPEN_LONG` / `OPEN_SHORT`.
+1.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validatePortfolioRisk(usdAtRisk, accountState, strategyContext)`.
+2.  **\[Logic (Критично)\]** `_validatePortfolioRisk` выполняет **все** расчеты (суммирование рисков, расчет процентов) с использованием `decimal.js` и методов `Decimal` (`.sub()`, `.abs()`, `.mul()`, `.div()`, `.add()`, `.gt()`).
+3.  **\[Logic\]** `_validatePortfolioRisk` корректно итерирует `accountState.open_positions` и рассчитывает `posRiskUsd` для каждой позиции, используя формулу `entry.sub(stop).abs().mul(amount)`.
+4.  **\[Logic\]** `_validatePortfolioRisk` корректно рассчитывает `totalCurrentRiskPercent` (суммарный риск _открытых_ позиций) по формуле `totalCurrentRiskUsd.div(totalValue).mul(100)` и `newTradeRiskPercent` (риск _новой_ сделки) по формуле `usdAtRisk.div(totalValue).mul(100)`.
+5.  **\[Logic\]** `_validatePortfolioRisk` использует `toDecimal()` для преобразования `riskRules.max_total_portfolio_risk_percent` и бросает `ValidationError` с информативным сообщением на английском языке, если `projectedTotalRiskPercent.gt(maxTotalRiskPercent)`.
+6.  **\[Logic\]** `_validatePortfolioRisk` корректно обрабатывает случай, когда `total_portfolio_value_usdt` равен 0 (проверка через `.isZero()` или `.eq(zero)`, пропускает проверку с `warn` логом).
+7.  **\[Service\]** `validateDecision` (главный метод) теперь вызывает `_validatePortfolioRisk(calculatedAmounts.usdAtRisk, accountState, strategyContext)` (после `_calculatePositionSizing`) для `OPEN_LONG` / `OPEN_SHORT`.
+8.  **\[Debug\]** `_validatePortfolioRisk` логирует `debug` сообщение с детальной информацией о расчетах риска перед проверкой лимита.

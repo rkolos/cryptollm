@@ -19,10 +19,11 @@
   - `@types/node` (указать версию, соответствующую Node 20, например `@types/node: "^20.0.0"`)
   - `eslint`
   - `@typescript-eslint/parser` (для парсинга TS-кода)
-  - `@typescript-eslint/plugin` (для набора TS-правил)
+  - `@typescript-eslint/eslint-plugin` (для набора TS-правил)
   - `eslint-config-prettier` (для **отключения** правил ESLint, конфликтующих с Prettier)
   - `prettier`
   - `tsx` (для запуска TS "на лету" в режиме разработки, как более современная альтернатива `ts-node`)
+  - `knip` (для проверки неиспользуемого кода, используется в скрипте `check:unused`)
 
 ### 2.2. `tsconfig.json`
 
@@ -34,15 +35,20 @@
   - `"module": "NodeNext"` (Система модулей, совместимая с ESM в Node.js)
   - `"moduleResolution": "NodeNext"` (Алгоритм разрешения модулей, обязателен для `NodeNext`)
   - `"esModuleInterop": true` (Обеспечивает совместимость `import` с `require` для старых библиотек)
+  - `"allowSyntheticDefaultImports": true` (Разрешает импорт по умолчанию из модулей без экспорта по умолчанию)
   - `"skipLibCheck": true` (Ускоряет компиляцию, пропуская проверку `.d.ts` файлов)
   - `"forceConsistentCasingInFileNames": true` (Предотвращает ошибки на case-sensitive файловых системах)
   - `"noUncheckedIndexedAccess": true` (Дополнительная строгость: доступ к элементу массива/объекта по индексу/ключу считается `T | undefined`)
   - `"outDir": "./dist"` (Куда компилировать JS)
   - `"rootDir": "./src"` (Где лежат исходные TS-файлы)
+- Дополнительно должны быть настроены:
+  - `"include": ["src/**/*"]` (Включать все файлы из директории `src`)
+  - `"exclude": ["node_modules", "dist"]` (Исключать из компиляции)
 
-### 2.3. ESLint (Конфигурация `.eslintrc.js` или `.json`)
+### 2.3. ESLint (Конфигурация `.eslintrc.cjs`)
 
 - Настроить ESLint для работы с TypeScript и Prettier.
+- **Критический нюанс:** Файл должен иметь расширение `.cjs` (CommonJS), т.к. проект использует `"type": "module"` в `package.json`. Это позволяет ESLint корректно работать в ESM-окружении.
 - **Нюанс:** Порядок расширений (extends) критически важен.
 - Обязательные параметры:
   - `parser: '@typescript-eslint/parser'`
@@ -51,7 +57,13 @@
     2.  `'plugin:@typescript-eslint/recommended'`
     3.  `'prettier'` (**Обязательно** должен быть последним, чтобы отключить конфликтующие правила)
 
-  - `plugins: ['@typescript-eslint/plugin']`
+  - `plugins: ['@typescript-eslint']` (используется плагин без суффикса `/plugin`)
+  - `parserOptions`:
+    - `ecmaVersion: 2022`
+    - `sourceType: 'module'`
+  - `env`:
+    - `node: true`
+    - `es2022: true`
   - В `rules` добавить:
     - `"@typescript-eslint/no-explicit-any": "error"` (Запрет `any` для повышения строгости)
     - `"@typescript-eslint/no-unused-vars": "warn"` (Подсвечивать неиспользуемые переменные)
@@ -75,7 +87,7 @@
       ├── .eslintignore
       ├── .gitignore
       ├── .prettierrc
-      ├── .eslintrc.js
+      ├── .eslintrc.cjs
       ├── package.json
       ├── tsconfig.json
 
@@ -84,8 +96,9 @@
 - В `.gitignore` обязательно добавить:
   - `node_modules/`
   - `dist/`
-  - `.env*`
+  - `.env*` (включая `.env.local`, `.env.*.local`)
   - `*.log`
+  - `logs/` (директория для лог-файлов, создаваемая LoggingService)
 
 - В `.eslintignore` добавить:
   - `dist/`
@@ -93,14 +106,19 @@
 
 ### 2.7. `npm` скрипты (в `package.json`)
 
-- Определить следующие скрипты:
+- Определить следующие базовые скрипты:
   - `"build"`: `"tsc"` (Компиляция проекта)
+  - `"typecheck"`: `"tsc --noEmit"` (Проверка типов без генерации файлов)
   - `"start:prod"`: `"node dist/index.js"` (Запуск скомпилированной версии)
   - `"dev"`: `"tsx watch src/index.ts"` (Запуск в режиме разработки с автоперезагрузкой)
   - `"lint"`: `"eslint . --ext .ts"` (Проверка кода линтером)
   - `"lint:fix"`: `"eslint . --ext .ts --fix"` (Автоматическое исправление ошибок линтера)
   - `"format:check"`: `"prettier --check ."` (Проверка форматирования)
   - `"format"`: `"prettier --write ."` (Автоматическое форматирование)
+  - `"check:unused"`: `"knip"` (Проверка неиспользуемого кода через knip)
+  - `"check:all"`: `"npm run typecheck && npm run lint && npm run format:check"` (Комплексная проверка: типы, линтер, форматирование)
+
+**Примечание:** Дополнительные скрипты для тестирования, миграций БД и утилит добавляются в последующих задачах.
 
 ## 3\. Критерии Приемки (Acceptance Criteria)
 

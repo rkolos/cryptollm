@@ -56,27 +56,32 @@
             /**
              * (Публичный метод) Обрабатывает тик от FastCycleService.
              */
-            public handleTicker(ticker: Ticker, tslState: TSL_State): void {
-                if (GlobalStateService.getInstance().isPaused()) return;
+            public handleTicker(ticker: Ticker, tslRule: TSLRule): void {
+                try {
+                    // ... (Логика расчета newStopPrice из Задачи 5.4 через _calculateTSL)
+                    const currentPrice = new DecimalConstructor(ticker.last.toString());
+                    const requiredUpdate = this._calculateTSL(tslRule, currentPrice);
 
-                // ... (Логика расчета newStopPrice из Задачи 5.4)
-                // const needsUpdate = (newStopPrice > tslState.currentStopPrice);
+                    if (requiredUpdate) {
+                        const pair = ticker.symbol;
+                        this.logger.info(
+                            `(TSLHandler) [${pair}] TSL UPDATE: Цена ${currentPrice.toString()}. Двигаем SL с ${tslRule.state.currentStopPrice.toString()} на ${requiredUpdate.newStopPrice.toString()}`,
+                        );
 
-                if (needsUpdate) {
-                    const pair = ticker.symbol;
-
-                    // (Критично) ВЫЗЫВАЕМ БЕЗ AWAIT
-                    // Мы не блокируем WebSocket-цикл.
-                    this.pairActorManager.execute(pair, () =>
-                        this._internalUpdateTSL(pair, newStopPrice, tslState)
-                    )
-                    .catch((error) => {
-                        // (Критично) Ловим ошибку из "отсоединенного" Promise,
-                        // чтобы предотвратить UnhandledPromiseRejection.
-                        this.logger.error(`[${pair}] [TSL] КРИТИЧЕСКАЯ ОШИБКА в 'execute': ${error.message}`);
-                        // (Рекомендуется) Отправить PUSH-уведомление
-                        // NotificationService.getInstance().sendAlert(...)
-                    });
+                        // (Задача 9.3) Вызов "Актора" (Fire-and-Forget)
+                        this.pairActorManager
+                            .execute(pair, async () => {
+                                await this._updateStopLossOrder(pair, tslRule, requiredUpdate.newStopPrice, currentPrice);
+                            })
+                            .catch((e) => {
+                                // (Критично) Ловим ошибку из "отсоединенного" Promise,
+                                // чтобы предотвратить UnhandledPromiseRejection.
+                                this.logger.error(`(TSLHandler) [${pair}] КРИТИЧЕСКАЯ ОШИБКА в акторе: ${String(e)}`, e);
+                            });
+                    }
+                } catch (error) {
+                    this.logger.error(`(TSLHandler) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ: ${String(error)}`, error);
+                    // Не бросаем ошибку, чтобы не "убить" WS-цикл
                 }
             }
         }
@@ -103,45 +108,56 @@
             /**
              * (Публичный метод) Обрабатывает тик от FastCycleService.
              */
-            public handleTicker(ticker: Ticker, triggers: PriceTrigger[]): void {
-                if (GlobalStateService.getInstance().isPaused()) return;
+            public handleTicker(ticker: Ticker, triggers: LLMTriggerCondition[]): void {
+                try {
+                    const pair = ticker.symbol;
+                    const currentPrice = new DecimalConstructor(ticker.last.toString());
 
-                const pair = ticker.symbol;
+                    // ... (Логика поиска сработавшего `priceTrigger` из Задачи 5.5 через _findPriceTrigger)
+                    const triggeredCondition = this._findPriceTrigger(triggers, currentPrice);
 
-                // ... (Логика поиска сработавшего `priceTrigger` из Задачи 5.5)
-                const triggerHit = ...;
+                    if (triggeredCondition) {
+                        // (Логика из 5.5) Проверка на наличие `OPEN_LIMIT`
+                        const accountState = this.accountStateService.getAccountState();
+                        const hasOpenLimit = accountState.open_orders.find(
+                            (o) => o.pair === pair && (o.type === 'limit_open' || o.type === 'limit'),
+                        );
 
-                if (triggerHit) {
-                    // (Логика из 5.5) Проверка на наличие `OPEN_LIMIT`
-                    const accountState = this.accountState.getAccountState();
-                    const hasOpenLimit = accountState.open_orders.find(o => o.pair === pair && o.type === 'limit_open');
+                        if (hasOpenLimit) {
+                            this.logger.debug(
+                                `(PriceHandler) [${pair}] Price trigger ${triggeredCondition.value} проигнорирован из-за активного LIMIT ордера. SyncEngine обработает его.`,
+                            );
+                            return;
+                        }
 
-                    if (hasOpenLimit) {
-                        this.logger.debug(`[${pair}] [PriceTrigger] Триггер цены ${triggerHit.value} проигнорирован из-за активного OPEN_LIMIT ордера. SyncEngine обработает его.`);
-                        return;
+                        // "Предохранитель" не сработал, передаем управление Оркестратору
+                        this.logger.info(
+                            `(PriceHandler) [${pair}] Price trigger hit: ${currentPrice.toString()} ${triggeredCondition.condition} ${triggeredCondition.value}. Calling Orchestrator.`,
+                        );
+
+                        // (Задача 9.3) Вызов "Актора" (Fire-and-Forget)
+                        this.pairActorManager
+                            .execute(pair, async () => {
+                                await this.orchestrator.executeOrchestration(pair, 'Price Trigger Hit');
+                            })
+                            .catch((e) => {
+                                // (Критично) Ловим ошибку из "отсоединенного" Promise.
+                                this.logger.error(`(PriceHandler) [${pair}] КРИТИЧЕСКАЯ ОШИБКА в акторе: ${String(e)}`, e);
+                            });
                     }
-
-                    this.logger.info(`[${pair}] [PriceTrigger] Сработал триггер цены: ${triggerHit.value}. Запускаем вызов LLM...`);
-
-                    // (Критично) ВЫЗЫВАЕМ БЕЗ AWAIT
-                    this.pairActorManager.execute(pair, () =>
-                        // (Задача 5.5) Вызов WatcherOrchestrator
-                        this.watcherOrchestrator.executeLLMCall(pair, `Price Trigger Hit: ${triggerHit.value}`)
-                    )
-                    .catch((error) => {
-                        // (Критично) Ловим ошибку из "отсоединенного" Promise.
-                        this.logger.error(`[${pair}] [PriceTrigger] КРИТИЧЕСКАЯ ОШИБКА в 'execute' (LLM Call): ${error.message}`);
-                        // (Рекомендуется) Отправить PUSH-уведомление
-                    });
+                } catch (error) {
+                    this.logger.error(`(PriceHandler) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ: ${String(error)}`, error);
+                    // Не бросаем ошибку, чтобы не "убить" WS-цикл
                 }
             }
         }
 
 ## 4\. Критерии Приемки (Acceptance Criteria)
 
-1.  **\[TSLHandler\]** `TSLHandlerService` внедряет `PairActorManagerService`.
-2.  **\[TSLHandler (Критично)\]** Вызов `pairActorManager.execute` для обновления TSL (Задача 5.4) выполняется **БЕЗ** `await`, чтобы не блокировать цикл WS.
-3.  **\[TSLHandler\]** "Отсоединенный" `Promise` от `execute` имеет обработчик `.catch()` для логирования ошибок.
-4.  **\[PriceTriggerHandler\]** `PriceTriggerHandler` внедряет `PairActorManagerService`.
-5.  **\[PriceTriggerHandler (Критично)\]** Вызов `pairActorManager.execute` для запуска `WatcherOrchestrator.executeLLMCall` (Задача 5.5) выполняется **БЕЗ** `await`.
-6.  **\[PriceTriggerHandler\]** "Отсоединенный" `Promise` от `execute` имеет обработчик `.catch()` для логирования ошибок.
+1.  **\[TSLHandler\]** `TSLHandlerService` внедряет `PairActorManagerService` через DI (конструктор принимает `pairActorManager: PairActorManagerService`).
+2.  **\[TSLHandler (Критично)\]** Вызов `pairActorManager.execute` для обновления TSL (через `_updateStopLossOrder`) выполняется **БЕЗ** `await`, чтобы не блокировать цикл WS (fire-and-forget).
+3.  **\[TSLHandler\]** "Отсоединенный" `Promise` от `execute` имеет обработчик `.catch()` для логирования ошибок (`logger.error`). Весь метод `handleTicker` обернут в `try/catch` для предотвращения "убийства" WS-цикла.
+4.  **\[PriceTriggerHandler\]** `PriceTriggerHandler` внедряет `PairActorManagerService` через DI (конструктор принимает `pairActorManager: PairActorManagerService`).
+5.  **\[PriceTriggerHandler (Критично)\]** Вызов `pairActorManager.execute` для запуска `orchestrator.executeOrchestration(pair, 'Price Trigger Hit')` выполняется **БЕЗ** `await` (fire-and-forget).
+6.  **\[PriceTriggerHandler\]** "Отсоединенный" `Promise` от `execute` имеет обработчик `.catch()` для логирования ошибок (`logger.error`). Весь метод `handleTicker` обернут в `try/catch` для предотвращения "убийства" WS-цикла.
+7.  **\[PriceTriggerHandler\]** Логика проверяет наличие открытого LIMIT ордера (`limit_open` или `limit`) через `accountState.open_orders` перед вызовом оркестратора.

@@ -46,8 +46,8 @@
     const CACHE_TTL_MS = 3_600_000; // 1 час
 
     export class MacroContextService {
-        private static instance: MacroContextService;
-        private logger: LoggingService;
+        private static instance: MacroContextService | undefined;
+        private readonly logger: winston.Logger;
 
         // (In-memory кэш)
         private contextCache: MacroContext = {
@@ -58,8 +58,8 @@
         private fetchPromise: Promise<void> | null = null;
 
         private constructor() {
-            this.logger = LoggingService.getInstance();
-            this.logger.registerContext("MacroContextService");
+            this.logger = LoggingService.getInstance().getLogger('MacroContext');
+            this.logger.info('MacroContextService initialized.');
         }
 
         public static getInstance(): MacroContextService {
@@ -87,9 +87,9 @@
             if (Date.now() - this.lastFetchTime > CACHE_TTL_MS) {
                 this.logger.debug("Кэш 'Fear & Greed' устарел, обновляю...");
                 // (Не используем await, чтобы не блокировать SlowCycle)
-                this.forceRefresh().catch(e => {
-                    this.logger.warn(`Фоновое обновление 'Fear & Greed' не удалось: ${e.message}`);
-                });
+                    this.forceRefresh().catch((e) => {
+                        this.logger.warn(`Фоновое обновление 'Fear & Greed' не удалось: ${(e as Error).message}`);
+                    });
             }
         }
 
@@ -120,10 +120,12 @@
                         timeout: 5000 // (Таймаут 5 сек)
                     });
 
-                    if (response.data && response.data.data && response.data.data.length > 0) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const responseData = response.data as any;
+                    if (responseData && responseData.data && Array.isArray(responseData.data) && responseData.data.length > 0) {
                         const data = response.data.data[0];
-                        const newIndex = parseInt(data.value, 10);
-                        const newText = data.value_classification;
+                        const newIndex = parseInt(String(data.value), 10);
+                        const newText = String(data.value_classification || '');
 
                         if (!isNaN(newIndex) && newText) {
                             this.contextCache = {
@@ -139,9 +141,10 @@
                         throw new Error("API вернул пустой или некорректный ответ.");
                     }
 
-                } catch (error: any) {
-                    this.logger.error(`Ошибка при загрузке 'Fear & Greed Index': ${error.message}`);
-                    // (Важно: не "валим" приложение, просто оставляем старый кэш)
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    this.logger.error(`Ошибка при загрузке 'Fear & Greed Index': ${errorMessage}`);
+                    // Важно: не "валим" приложение, просто оставляем старый кэш
                 } finally {
                     this.fetchPromise = null; // (Снимаем блокировку)
                 }

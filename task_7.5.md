@@ -620,73 +620,101 @@
         }
 
         // (ИЗМЕНЕНО в 7.5) - Реализация `CANCEL_ORDERS`
-        private async handleCancelOrders(decision: LLMDecision, validationResult: ValidationResult): Promise<void> {
+        private async handleCancelOrders(
+            decision: LLMDecision,
+            _validationResult: CalculatedAmounts
+        ): Promise<void> {
             const { pair, parameters } = decision;
-            const { order_id_to_cancel } = parameters;
+            const orderIdToCancel = parameters.order_id;
 
             this.logger.debug(`[${pair}] Запуск handleCancelOrders...`);
 
-            // (Критично) Вся операция выполняется в ОДНОЙ транзакции
-            await this.dbService.executeInTransaction(async (client: TransactionClient): Promise<void> => {
+            // КРИТИЧНО: Отмена на бирже должна происходить ДО транзакции БД
+            // Если отмена провалится, БД операция не начнется
+            // Если отмена пройдет, а БД операция упадет - отмененные ордера будут "призраками" в БД
 
-                if (order_id_to_cancel) {
-                    // --- Сценарий A: Отмена КОНКРЕТНОГО ордера ---
-                    this.logger.debug(`[${pair}] Отмена конкретного ордера: ${order_id_to_cancel}`);
+            if (orderIdToCancel) {
+                // --- Сценарий A: Отмена КОНКРЕТНОГО ордера ---
+                this.logger.debug(`[${pair}] Отмена конкретного ордера: ${orderIdToCancel}`);
 
-                    // (Шаг 1: Отмена на Бирже)
-                    // (Используем Guaranteed service)
-                    await this.executionService.cancelOrderWithRetry(order_id_to_cancel, pair);
-
-                    // (Шаг 2: Атомарная очистка БД)
-
-                    // 2.1. Удаляем из ActiveOrders
-                    await client.query(
-                        `DELETE FROM ActiveOrders WHERE exchange_order_id = $1`,
-                        [order_id_to_cancel]
+                // Шаг 1: Отмена на Бирже (ДО транзакции БД)
+                try {
+                    await this.executionService.cancelOrderWithRetry(orderIdToCancel, pair);
+                    this.logger.debug(`[${pair}] Ордер ${orderIdToCancel} успешно отменен на бирже.`);
+                } catch (error) {
+                    // Если отмена на бирже провалилась, не обновляем БД (ордер может быть уже исполнен)
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    this.logger.warn(
+                        `[${pair}] Не удалось отменить ордер ${orderIdToCancel} на бирже (возможно, уже исполнен): ${errorMessage}`,
                     );
+                    // Продолжаем: возможно ордер уже исполнен или не существует, все равно удалим из БД
+                }
+
+                // Шаг 2: Атомарная очистка БД (даже если отмена на бирже провалилась - удаляем "призрак")
+                await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+                    // 2.1. Удаляем из ActiveOrders
+                    await client.query(`DELETE FROM ActiveOrders WHERE exchange_order_id = $1`, [orderIdToCancel]);
 
                     // 2.2. (Критично) Удаляем связанный TSL, если он был
-                    // (Если мы отменили SL, TSL больше недействителен)
-                    await client.query(
-                        `DELETE FROM TSL_State WHERE current_sl_order_id = $1`,
-                        [order_id_to_cancel]
-                    );
+                    // Если мы отменили SL, TSL больше недействителен
+                    await client.query(`DELETE FROM TSL_State WHERE current_stop_order_id = $1`, [orderIdToCancel]);
+                });
 
-                } else {
-                    // --- Сценарий Б: Отмена ВСЕХ ордеров по паре ---
-                    this.logger.debug(`[${pair}] Отмена ВСЕХ ордеров...`);
+                this.logger.info(`[${pair}] Атомарная транзакция (CANCEL Orders) УСПЕШНА.`);
+            } else {
+                // --- Сценарий Б: Отмена ВСЕХ ордеров по паре ---
+                this.logger.debug(`[${pair}] Отмена ВСЕХ ордеров...`);
 
-                    // (Шаг 1: Получить ВСЕ ID ордеров из БД)
-                    // (Мы должны сделать это *до* отмены, чтобы получить полный список)
-                    const ordersResult = await client.query(
-                        `SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1 FOR UPDATE`,
-                        [pair]
-                    );
-                    const orderIdsToCancel: string[] = ordersResult.rows.map(r => r.exchange_order_id);
+                // Шаг 1: Получить ВСЕ ID ордеров из БД (перед отменой на бирже)
+                const ordersResult = await this.databaseService.query(
+                    `SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1`,
+                    [pair],
+                );
+                const orderIdsToCancel: string[] = ordersResult.rows.map((r) => r.exchange_order_id as string);
 
-                    // (Шаг 2: Отмена ВСЕХ ордеров на Бирже)
-                    for (const orderId of orderIdsToCancel) {
-                        // (Отменяем по одному, используя Guaranteed service)
+                if (orderIdsToCancel.length === 0) {
+                    this.logger.warn(`[${pair}] Нет ордеров для отмены.`);
+                    return;
+                }
+
+                // Шаг 2: Отмена ВСЕХ ордеров на Бирже (ДО транзакции БД)
+                const successfullyCancelledIds: string[] = [];
+                const failedToCancelIds: string[] = [];
+
+                for (const orderId of orderIdsToCancel) {
+                    try {
                         await this.executionService.cancelOrderWithRetry(orderId, pair);
+                        successfullyCancelledIds.push(orderId);
+                        this.logger.debug(`[${pair}] Ордер ${orderId} успешно отменен на бирже.`);
+                    } catch (error) {
+                        // Логируем ошибку, но продолжаем отмену остальных ордеров
+                        const errorMessage = error instanceof Error ? error.message : String(error);
+                        this.logger.warn(`[${pair}] Не удалось отменить ордер ${orderId} на бирже: ${errorMessage}`);
+                        failedToCancelIds.push(orderId);
                     }
+                }
 
-                    // (Шаг 3: Атомарная очистка БД)
-
-                    // 3.1. Удаляем ВСЕ ордера по паре
-                    await client.query(
-                        `DELETE FROM ActiveOrders WHERE pair = $1`,
-                        [pair]
-                    );
+                // Шаг 3: Атомарная очистка БД (удаляем все ордера, включая те, что не удалось отменить на бирже)
+                // Если ордер не был отменен на бирже (ошибка), но был удален из БД - SyncEngine восстановит состояние
+                await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+                    // 3.1. Удаляем ВСЕ ордера по паре (и успешно отмененные, и неотмененные - они могут быть "призраками")
+                    await client.query(`DELETE FROM ActiveOrders WHERE pair = $1`, [pair]);
 
                     // 3.2. Удаляем ВСЕ TSL по паре
-                    await client.query(
-                        `DELETE FROM TSL_State WHERE pair = $1`,
-                        [pair]
+                    await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
+                });
+
+                // Логируем результаты
+                if (failedToCancelIds.length > 0) {
+                    this.logger.warn(
+                        `[${pair}] Часть ордеров не была отменена на бирже (${failedToCancelIds.length} из ${orderIdsToCancel.length}), но удалены из БД. SyncEngine восстановит состояние при следующей сверке.`,
                     );
                 }
 
-                this.logger.info(`[${pair}] Атомарная транзакция (CANCEL Orders) УСПЕШНА.`);
-            });
+                this.logger.info(
+                    `[${pair}] Атомарная транзакция (CANCEL Orders) УСПЕШНА. Успешно отменено: ${successfullyCancelledIds.length}, не удалось: ${failedToCancelIds.length}.`,
+                );
+            }
         }
     }
 
@@ -765,12 +793,18 @@
 
 41. **\[7.4 Step 2: Logic (SL)\]** Если `new_stop_loss_price` предоставлен, реализована логика "Cancel-Then-Create" (Отменить-Затем-Создать). 4al\]\*\* `handleCancelOrders` _полностью_ обернут в `this.dbService.executeInTransaction()`.
 
-42. **(НОВОЕ - 7.5) \[Logic (Case A: ID)\]** Если `order_id_to_cancel` предоставлен, `handleCancelOrders` вызывает `executionService.cancelOrderWithRetry()` для этого ID.
+42. **(НОВОЕ - 7.5) \[Architecture (Критично)\]** Отмена на бирже происходит **ДО** транзакции БД. Если отмена провалится, БД операция не начнется. Если отмена пройдет, а БД операция упадет - отмененные ордера будут "призраками" в БД.
 
-43. **(НОВОЕ - 7.5) \[DB (Case A: ID)\]** _Внутри_ транзакции, `handleCancelOrders` выполняет `DELETE FROM ActiveOrders` и (критично) `DELETE FROM TSL_State` используя `order_id_to_cancel`.
+43. **(НОВОЕ - 7.5) \[Logic (Case A: ID)\]** Если `order_id` предоставлен, `handleCancelOrders` вызывает `executionService.cancelOrderWithRetry()` для этого ID **ДО** транзакции БД в `try/catch` (продолжает выполнение даже при ошибке отмены).
 
-44. **(НОВОЕ - 7.5) \[Logic (Case B: null)\]** Если `order_id_to_cancel` равен `null`, `handleCancelOrders` _сначала_ делает `SELECT ... FROM ActiveOrders WHERE pair = $1 FOR UPDATE`, чтобы получить _все_ ID.
+44. **(НОВОЕ - 7.5) \[DB (Case A: ID)\]** _Внутри_ транзакции (`databaseService.executeInTransaction` с `PoolClient`), `handleCancelOrders` выполняет `DELETE FROM ActiveOrders WHERE exchange_order_id = $1` и (критично) `DELETE FROM TSL_State WHERE current_stop_order_id = $1` используя `orderIdToCancel`.
 
-45. **(НОВОЕ - 7.5) \[Logic (Case B: null)\]** Затем `handleCancelOrders` циклически вызывает `executionService.cancelOrderWithRetry()` для _каждого_ полученного ID.
+45. **(НОВОЕ - 7.5) \[Logic (Case B: null)\]** Если `order_id` равен `null` или `undefined`, `handleCancelOrders` _сначала_ делает `SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1` (БЕЗ `FOR UPDATE`, ДО транзакции БД), чтобы получить _все_ ID. Если список пуст, возвращается с `warn`.
 
-46. **(НОВОЕ - 7.5) \[DB (Case B: null)\]** _Внутри_ транзакции, `handleCancelOrders` выполняет `DELETE FROM ActiveOrders WHERE pair = $1` и `DELETE FROM TSL_State WHERE pair = $1`.
+46. **(НОВОЕ - 7.5) \[Logic (Case B: null)\]** Затем `handleCancelOrders` циклически вызывает `executionService.cancelOrderWithRetry()` для _каждого_ полученного ID **ДО** транзакции БД, сохраняя успешно отмененные ID в `successfullyCancelledIds` и неотмененные в `failedToCancelIds`.
+
+47. **(НОВОЕ - 7.5) \[DB (Case B: null)\]** _Внутри_ транзакции (`databaseService.executeInTransaction` с `PoolClient`), `handleCancelOrders` выполняет `DELETE FROM ActiveOrders WHERE pair = $1` и `DELETE FROM TSL_State WHERE pair = $1` (удаляет все ордера, включая неотмененные на бирже).
+
+48. **(НОВОЕ - 7.5) \[Logging (Case B)\]** После транзакции логируется предупреждение, если часть ордеров не была отменена на бирже (`failedToCancelIds.length > 0`), с информацией о количестве успешно отмененных и неотмененных ордеров.
+
+49. **(НОВОЕ - 7.5) \[Parameter Name\]** Используется `parameters.order_id` вместо `parameters.order_id_to_cancel`.

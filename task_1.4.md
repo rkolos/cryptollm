@@ -18,7 +18,7 @@
 
 Сервис должен убедиться, что директория `./logs` существует.
 
-- **Нюанс:** При инициализации сервис должен синхронно (т.к. это происходит при старте) проверить наличие `./logs` и создать ее, если она отсутствует (`fs.mkdirSync('logs', { recursive: true })`).
+- **Нюанс:** При инициализации сервис должен синхронно (т.к. это происходит при старте) проверить наличие `./logs` с помощью `fs.existsSync()` и создать ее, если она отсутствует (`fs.mkdirSync('logs', { recursive: true })`).
 - **Нюанс:** Директория `logs/` должна быть немедленно добавлена в `.gitignore` (задача 1.1), так как файлы логов не должны попадать в репозиторий.
 
 ### 3.2. `src/services/LoggingService.ts`
@@ -27,11 +27,11 @@
 
 #### 3.2.1. Инициализация и Singleton
 
-- Класс должен использовать тот же паттерн, что и `ConfigService`: `private static instance` и `public static getInstance()`.
+- Класс должен использовать тот же паттерн, что и `ConfigService`: `private static instance: LoggingService | undefined` и `public static getInstance()`.
 - **Критично:** Должен быть создан **новый** статический метод `public static initialize()`. Этот метод должен вызываться в `index.ts` **после** `ConfigService.load()` и **до** `getInstance()`.
 - Метод `getInstance()` должен выбрасывать ошибку, если `initialize()` не был вызван.
 - `private constructor(config: ConfigService)`: Конструктор будет `private` и будет принимать экземпляр `ConfigService`.
-- `private mainLogger: winston.Logger;`: В конструкторе будет создан и сохранен основной (родительский) логгер `winston`.
+- `private readonly mainLogger: winston.Logger;`: В конструкторе будет создан и сохранен основной (родительский) логгер `winston`. Поле должно быть `readonly`, так как оно не изменяется после инициализации.
 
 #### 3.2.2. Конфигурация `winston` (в `private constructor`)
 
@@ -46,14 +46,15 @@
 5.  **Логика транспортов:**
     - **Если `appMode === 'dry_run'` (Режим разработки):**
       - Создать `devConsoleFormat`: `winston.format.combine(winston.format.colorize(), winston.format.timestamp({ format: 'HH:mm:ss' }), winston.format.splat(), winston.format.errors({ stack: true }), winston.format.printf(({ timestamp, level, message, context, stack }) => { ... }))`
-      - Формат `printf` должен выводить лог в виде: `HH:mm:ss level: [Context] Message`.
+      - Формат `printf` должен выводить лог в виде: `HH:mm:ss level: [Context] Message` (с пробелом после контекста). Если `context` отсутствует, он не выводится. Если есть `stack`, он выводится на новой строке после сообщения.
       - `transports.push(new winston.transports.Console({ format: devConsoleFormat, level: 'debug' }));` (Включить `debug` уровень для разработки).
 
     - **Если `appMode === 'production'` или `appMode === 'testnet'` (Режим Production/Testnet):**
       - **JSON Формат (для файлов):** `const jsonFormat = winston.format.combine(winston.format.timestamp(), winston.format.splat(), winston.format.errors({ stack: true }), winston.format.json());`
       - **File (Errors):** `transports.push(new winston.transports.File({ filename: path.join(logDir, 'error.log'), level: 'error', format: jsonFormat }));`
       - **File (Combined):** `transports.push(new winston.transports.File({ filename: path.join(logDir, 'combined.log'), format: jsonFormat }));`
-      - **Console (Prod):** Добавить простой консольный логгер для `stdout` (важно для Docker/PM2). `const prodConsoleFormat = winston.format.combine(winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }), ...)`
+      - **Console (Prod):** Добавить простой консольный логгер для `stdout` (важно для Docker/PM2). `const prodConsoleFormat = winston.format.combine(winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }), winston.format.splat(), winston.format.errors({ stack: true }), winston.format.printf(({ timestamp, level, message, context, stack }) => { ... }))`
+      - Формат `printf` должен выводить лог в виде: `YYYY-MM-DD HH:mm:ss LEVEL: [Context] Message` (уровень в верхнем регистре через `level.toUpperCase()`). Если `context` отсутствует, он не выводится. Если есть `stack`, он выводится на новой строке после сообщения.
       - `transports.push(new winston.transports.Console({ format: prodConsoleFormat, level: 'info' }));`
 
 6.  **Создание `mainLogger`:**

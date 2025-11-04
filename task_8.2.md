@@ -40,9 +40,9 @@
 
 ### 4.1. Настройка (`package.json` и `vitest.config.ts`)
 
-1.  **Логика:** Разработчик должен установить `vitest` и `@vitest/coverage-v8` как `devDependencies`.
-2.  **Логика:** Создать `vitest.config.ts` (или настроить `package.json`) для `vitest`.
-3.  **Логика:** Добавить новый `npm script` в `package.json`: `"test:unit": "vitest run --coverage"`
+1.  **Логика:** Разработчик должен установить `vitest`, `@vitest/coverage-v8` и `@vitest/ui` как `devDependencies`.
+2.  **Логика:** Создать `vitest.config.ts` с настройками: `globals: true`, `environment: 'node'`, `setupFiles: ['./src/__tests__/setup.ts']`, `include: ['src/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}']`, `coverage.provider: 'v8'`, `coverage.reporter: ['text', 'json', 'html']`, `coverage.thresholds` (lines: 70, functions: 70, branches: 60, statements: 70).
+3.  **Логика:** Добавить npm-скрипты в `package.json`: `"test": "vitest run"`, `"test:watch": "vitest"`, `"test:ui": "vitest --ui"`, `"test:coverage": "vitest run --coverage"`.
 
 ### 4.2. Тестирование `ValidatorService` (Приоритет 1)
 
@@ -101,7 +101,11 @@
 
 2.  Setup
 
-    В `package.json` добавлен скрипт `"test:unit": "vitest run --coverage"`.
+    В `package.json` добавлены скрипты `"test": "vitest run"`, `"test:watch": "vitest"`, `"test:ui": "vitest --ui"`, `"test:coverage": "vitest run --coverage"`.
+
+3.  Setup
+
+    Создан `vitest.config.ts` с настройками coverage, thresholds и setupFiles.
 
 3.  Validator(6.1−6.6)
 
@@ -131,12 +135,10 @@
 
     Тест `GuaranteedOrderExecutionService` _корректно_ проверяет логику `retry-then-verify` при `ccxt.NetworkError`.
 
-10. Run
+11. Run
 
+    Все новые юнит-тесты успешно проходят при выполнении `npm run test` или `npm run test:coverage`.
 
-    Все новые юнит-тесты успешно проходят при выполнении `npm run test:unit`.
+12. Coverage
 
-11. Coverage
-
-
-    Отчет о покрытии (`coverage/`) показывает, что покрытие `ValidatorService` составляет > 80%.
+    Отчет о покрытии (`coverage/`) показывает, что покрытие `ValidatorService` составляет > 80%. Пороги покрытия настроены в `vitest.config.ts` (lines: 70%, functions: 70%, branches: 60%, statements: 70%).

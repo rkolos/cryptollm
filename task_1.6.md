@@ -16,9 +16,9 @@
 
 Разработчик должен создать `GlobalStateService` как класс-Singleton.
 
-- **Паттерн Singleton:** `private static instance: GlobalStateService;` и `public static getInstance(): GlobalStateService;`.
+- **Паттерн Singleton:** `private static instance: GlobalStateService | undefined;` и `public static getInstance(): GlobalStateService;`.
 - **Инициализация:** В отличие от `ConfigService` и `LoggingService`, этот сервис не требует асинхронной загрузки. Его `getInstance()` может сам создавать экземпляр при первом вызове (lazy initialization).
-- **Логгер:** `private logger: winston.Logger;` (должен быть инициализирован в `private constructor()`).
+- **Логгер:** `private readonly logger: winston.Logger;` (должен быть инициализирован в `private constructor()`). Поле должно быть `readonly`, так как оно не изменяется после инициализации.
 
 #### 3.1.1. Внутреннее Состояние
 
@@ -28,15 +28,15 @@
 #### 3.1.2. Конструктор
 
     // src/services/GlobalStateService.ts (фрагмент)
-    import { LoggingService } from './LoggingService';
+    import { LoggingService } from './LoggingService.js';
     import type winston from 'winston';
 
     export class GlobalStateService {
-      private static instance: GlobalStateService;
+      private static instance: GlobalStateService | undefined;
 
       private isPaused: boolean = false;
       private isShuttingDown: boolean = false;
-      private logger: winston.Logger;
+      private readonly logger: winston.Logger;
 
       private constructor() {
         // Получаем логгер. LoggingService УЖЕ должен быть инициализирован

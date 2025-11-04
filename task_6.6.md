@@ -11,14 +11,13 @@
 ## 2\. Зависимости Задачи
 
 - **`ValidatorService.ts` (6.3):** (Модифицируемый) Файл, в который добавляется новая логика.
-- **`ExchangeRulesService` (3.2):** (Зависимость) Используется для получения правил `precision`.
-- **`ccxt` (1.2):** (Зависимость) Используется для импорта статических функций `amountToPrecision` и `priceToPrecision`.
-- **`decimal.js` (1.2):** (Зависимость)
-- **`src/interfaces/types.ts`:** (Модифицируемый) Файл, в который мы _возвращаем_ округленные значения.
+- **`ExchangeRulesService` (3.2):** (Зависимость) Используется для получения правил `precision` через `getRules(pair).precision`.
+- **`decimal.js` (1.2):** (Зависимость) Используется для всех расчетов и округления.
+- **`src/interfaces/IValidatorTypes.ts`:** (Модифицируемый) Файл, в который мы _возвращаем_ округленные значения.
 
 ## 3\. Описание и Нюансы Реализации
 
-### 3.1. Модификация `src/interfaces/types.ts`
+### 3.1. Модификация `src/interfaces/IValidatorTypes.ts`
 
 Мы обновляем `CalculatedAmounts`, чтобы он содержал _и_ сырые, _и_ округленные значения. Округленные пойдут в `Worker` (Исполнитель), а сырые (`usdAtRisk`) — в следующие шаги валидации (6.4, 6.5).
 
@@ -60,11 +59,12 @@
     export class ValidatorService {
         // ... (instance, logger, exchangeRules, constructor, getInstance из 6.1)
 
-        public validateAndCalculate(
+        public validateDecision(
             decision: LLMDecision,
             accountState: AccountState,
+            strategyContext: StrategyContext,
             marketData: MarketData,
-            riskRules: RiskRules
+            _exchangeRules: IMarketRules
         ): CalculatedAmounts {
 
             this.logger.debug(`[${decision.pair}] Запуск валидации для action: ${decision.action}...`);
@@ -84,12 +84,13 @@
             }
 
             // === УРОВЕНЬ 2 (Реализован в 6.2) ===
-            const { rawAmountCoin, rawAmountUsd, usdAtRisk } = this._calculatePositionSizing(
-                decision, entryPrice, accountState, riskRules
+            const calculatedAmounts = this._calculatePositionSizing(
+                decision, accountState, strategyContext, entryPrice
             );
+            const { rawAmountCoin, rawAmountUsd, usdAtRisk } = calculatedAmounts;
 
             // === УРОВЕНЬ 3 (Реализован в 6.3) ===
-            this._validatePortfolioRisk(usdAtRisk, accountState, riskRules);
+            this._validatePortfolioRisk(usdAtRisk, accountState, strategyContext);
 
             // === УРОВЕНЬ 4 (Часть 1 - Эта Задача: 6.6) ===
             const { roundedAmountCoin, roundedAmountUsd, roundedEntryPrice } = this._validateAndRoundPrecision(
@@ -142,33 +143,55 @@
                 throw new ValidationError(`[${pair}] Критическая ошибка: Отсутствуют правила точности (precision)`);
             }
 
-            // 1. Округляем 'amount' (количество монеты)
-            // (Используем ccxt.amountToPrecision, который возвращает string)
-            const roundedAmountStr = ccxt.amountToPrecision(
-                pair,
-                rawAmountCoin.toNumber(), // (Конвертируем Decimal в number для ccxt)
-                precision.amount
-            );
-            const roundedAmountCoin = new Decimal(roundedAmountStr);
+            // 1. Округляем 'amount' (количество монеты) используя precision.amount
+            // Вычисляем множитель на основе precision (например, 0.00000001 -> множитель 10^8)
+            // precision.e отрицательное для малых чисел (например, -8 для 0.00000001), поэтому берем abs
+            const amountPrecisionDecimal = precision.amount as any;
+            const amountPrecisionE = amountPrecisionDecimal.e !== undefined ? Math.abs(amountPrecisionDecimal.e) : 0;
+            const amountMultiplier = new DecimalConstructor(10).pow(amountPrecisionE);
+            // Округляем вниз до нужной точности
+            const rawAmountCoinDecimal = rawAmountCoin as any;
+            const roundedAmountCoin = rawAmountCoinDecimal.mul(amountMultiplier).floor().div(amountMultiplier) as DecimalValue;
 
-            // 2. Округляем 'price' (цену входа)
-            const roundedPriceStr = ccxt.priceToPrecision(
-                pair,
-                rawEntryPrice.toNumber(),
-                precision.price
-            );
-            const roundedEntryPrice = new Decimal(roundedPriceStr);
+            // 2. Округляем 'price' (цену входа) используя precision.price
+            // Вычисляем множитель на основе precision (например, 0.01 -> множитель 10^2)
+            // precision.e отрицательное для малых чисел (например, -2 для 0.01), поэтому берем abs
+            const pricePrecisionDecimal = precision.price as any;
+            const pricePrecisionE = pricePrecisionDecimal.e !== undefined ? Math.abs(pricePrecisionDecimal.e) : 0;
+            const priceMultiplier = new DecimalConstructor(10).pow(pricePrecisionE);
+            // Округляем вниз до нужной точности
+            const rawEntryPriceDecimal = rawEntryPrice as any;
+            const roundedEntryPrice = rawEntryPriceDecimal.mul(priceMultiplier).floor().div(priceMultiplier) as DecimalValue;
 
             // 3. (Критично) Пересчитываем 'amount_usd' на основе ОКРУГЛЕННЫХ значений
-            // rounded_amount_usd = rounded_amount_coin * rounded_price
-            const roundedAmountUsd = roundedAmountCoin.times(roundedEntryPrice);
+            // rounded_amount_usd = rounded_amount_coin * rounded_entry_price
+            const roundedAmountCoinDecimal = roundedAmountCoin as any;
+            const roundedEntryPriceDecimal = roundedEntryPrice as any;
+            const roundedAmountUsd = roundedAmountCoinDecimal.mul(roundedEntryPriceDecimal) as DecimalValue;
 
-            this.logger.debug(`[${pair}] Округление: Qty ${rawAmountCoin.toFixed(12)} -> ${roundedAmountCoin.toString()}`);
-            this.logger.debug(`[${pair}] Округление: Price ${rawEntryPrice.toFixed(5)} -> ${roundedEntryPrice.toString()}`);
-            this.logger.debug(`[${pair}] Округление: USD Value ${rawAmountCoin.times(rawEntryPrice).toFixed(5)} -> ${roundedAmountUsd.toFixed(5)}`);
+            this.logger.debug(
+                `[${pair}] Округление: Qty ${rawAmountCoinDecimal.toFixed(12)} -> ${roundedAmountCoinDecimal.toString()}`,
+            );
+            this.logger.debug(
+                `[${pair}] Округление: Price ${rawEntryPriceDecimal.toFixed(5)} -> ${roundedEntryPriceDecimal.toString()}`,
+            );
+            const rawAmountUsdDecimal = rawAmountCoinDecimal.mul(rawEntryPriceDecimal) as any;
+            const roundedAmountUsdDecimal = roundedAmountUsd as any;
+            this.logger.debug(
+                `[${pair}] Округление: USD Value ${rawAmountUsdDecimal.toFixed(5)} -> ${roundedAmountUsdDecimal.toFixed(5)}`,
+            );
 
-            if (roundedAmountCoin.isZero() || roundedAmountUsd.isZero()) {
-                throw new ValidationError(`[${pair}] После округления размер позиции стал 0. Увеличьте риск или дистанцию до стопа.`);
+            // Проверка нулевых значений после округления
+            const zero = new DecimalConstructor(0);
+            if (
+                roundedAmountCoinDecimal.isZero() ||
+                roundedAmountCoinDecimal.eq(zero) ||
+                roundedAmountUsdDecimal.isZero() ||
+                roundedAmountUsdDecimal.eq(zero)
+            ) {
+                throw new ValidationError(
+                    `[${pair}] После округления размер позиции стал 0. Увеличьте риск или дистанцию до стопа.`,
+                );
             }
 
             return { roundedAmountCoin, roundedAmountUsd, roundedEntryPrice };
@@ -179,12 +202,12 @@
 
 ## 4\. Критерии Приемки (Acceptance Criteria)
 
-1.  **\[Interface\]** `src/interfaces/types.ts` обновлен: `CalculatedAmounts` теперь содержит `roundedAmountCoin`, `roundedAmountUsd` и `roundedEntryPrice`.
-2.  **\[Service\]** В `ValidatorService.ts` добавлен импорт `ccxt`.
-3.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validateAndRoundPrecision`.
-4.  **\[Logic (Критично)\]** `_validateAndRoundPrecision` вызывает `this.exchangeRules.getPrecision(pair)` и бросает `ValidationError`, если правила не найдены.
-5.  **\[Logic\]** `_validateAndRoundPrecision` использует `ccxt.amountToPrecision` для округления `rawAmountCoin` до `precision.amount`.
-6.  **\[Logic\]** `_validateAndRoundPrecision` использует `ccxt.priceToPrecision` для округления `rawEntryPrice` до `precision.price`.
-7.  **\[Logic (Критично)\]** `_validateAndRoundPrecision` **повторно рассчитывает** `roundedAmountUsd`, используя формулу `roundedAmountCoin.times(roundedEntryPrice)`.
-8.  **\[Logic\]** `_validateAndRoundPrecision` бросает `ValidationError`, если `roundedAmountCoin` или `roundedAmountUsd` стали равны 0 после округления.
-9.  **\[Service\]** `validateAndCalculate` (главный метод) теперь вызывает `_validateAndRoundPrecision` (после Уровня 3) и возвращает _все_ рассчитанные значения (raw, rounded, risk) в объекте `CalculatedAmounts`.
+1.  **\[Interface\]** `src/interfaces/IValidatorTypes.ts` обновлен: `CalculatedAmounts` теперь содержит `roundedAmountCoin`, `roundedAmountUsd` и `roundedEntryPrice` (типа `DecimalValue`).
+2.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validateAndRoundPrecision(pair, rawAmountCoin, rawEntryPrice)`.
+3.  **\[Logic (Критично)\]** `_validateAndRoundPrecision` вызывает `this.exchangeRulesService.getRules(pair).precision` и бросает `ValidationError`, если precision не найден.
+4.  **\[Logic\]** `_validateAndRoundPrecision` округляет `rawAmountCoin` до `precision.amount` используя вычисление множителя `10^abs(precision.amount.e)` и метод `.floor()` для округления вниз: `rawAmountCoin.mul(amountMultiplier).floor().div(amountMultiplier)`.
+5.  **\[Logic\]** `_validateAndRoundPrecision` округляет `rawEntryPrice` до `precision.price` используя вычисление множителя `10^abs(precision.price.e)` и метод `.floor()` для округления вниз: `rawEntryPrice.mul(priceMultiplier).floor().div(priceMultiplier)`.
+6.  **\[Logic (Критично)\]** `_validateAndRoundPrecision` **повторно рассчитывает** `roundedAmountUsd`, используя формулу `roundedAmountCoin.mul(roundedEntryPrice)`.
+7.  **\[Logic\]** `_validateAndRoundPrecision` логирует `debug` сообщения с детальной информацией об округлении (Qty, Price, USD Value).
+8.  **\[Logic\]** `_validateAndRoundPrecision` бросает `ValidationError`, если `roundedAmountCoin` или `roundedAmountUsd` стали равны 0 после округления (проверка через `.isZero()` или `.eq(zero)`).
+9.  **\[Service\]** `validateDecision` (главный метод) теперь вызывает `_validateAndRoundPrecision(decision.pair, rawAmountCoin, entryPrice)` (после Уровня 3) и возвращает _все_ рассчитанные значения (raw, rounded, risk) в объекте `CalculatedAmounts`.

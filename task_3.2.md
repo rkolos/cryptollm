@@ -39,7 +39,12 @@
     - **Шаг 1. Загрузка:** Метод _обязан_ вызвать `await exchangeService.loadMarkets()` и получить сырые данные через `exchangeService.getRawMarkets()`.
     - **Шаг 2. Итерация:** _обязан_ пройтись циклом по всем парам из `ConfigService.getWatchlist()`.
     - **Шаг 3. Валидация:** Если пара из `watchlist` не найдена в сырых данных биржи, _обязан_ залогировать `FATAL` и вызвать `process.exit(1)`.
-    - **Шаг 4. Парсинг с Fallback (Критично):** Разработчик _обязан_ использовать `try/catch` или операторы `??` для извлечения `minNotional`, `takerFee`, `precision.amount` и `precision.price`. _Обязан_ использовать **консервативные** значения по умолчанию (e.g., $10 для `minNotional`, 0.001 для `takerFee`, `new Decimal('0.01')` для `precision.price`).
+      - **Шаг 4. Парсинг с Fallback (Критично):** Разработчик _обязан_ использовать приватный статический метод `parseMarketRules(market)` для парсинга правил. Метод должен использовать операторы `??` для извлечения `minNotional`, `takerFee`, `precision.amount` и `precision.price`. _Обязан_ использовать **консервативные** значения по умолчанию:
+        - `minNotional`: `new Decimal(10)` (если `limits.cost.min` отсутствует)
+        - `takerFee`: `new Decimal(0.001)` (если `fees.taker` отсутствует)
+        - `precision.amount`: `new Decimal('0.00000001')` (если `precision.amount` отсутствует)
+        - `precision.price`: `new Decimal('0.01')` (если `precision.price` отсутствует)
+      - **Обработка ошибок:** Если парсинг правил для пары завершается с ошибкой, залогировать `error` и вызвать `process.exit(1)`.
     - **Шаг 5. Кэширование:** Каждое правило _обязано_ быть сохранено в `rulesCache` с типом `Decimal`.
 
 3.  **Метод `public getRules(pair: string)` (Синхронный API):**
@@ -84,3 +89,7 @@
 8.  APIError
 
     `getRules(pair)` _корректно_ бросает ошибку, если пара не найдена в кэше `rulesCache`.
+
+9.  StaticMethod
+
+    Реализован статический метод `loadRulesForPair(pair, exchangeService)` для загрузки правил для конкретной пары (используется в скриптах восстановления). Метод возвращает `IMarketRules | null`.

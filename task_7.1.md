@@ -20,77 +20,24 @@
 - **`EventBusService` (4.5.1):** (Зависимость) Для `emit('trade_executed')`.
 - **`NotificationService` (1.5/3.6):** (Зависимость) Для `sendAlert()`.
 - **`GlobalStateService` (1.6):** (Зависимость) Для `pause()` при `InsufficientFunds`.
-- **`AccountStateService` (4.5):** (Зависимость) Для `refreshNow()` при `InsufficientFunds`.
+- **`AccountStateService` (4.5):** (Зависимость) Для `refreshNow()` при `InsufficientFunds` и после каждого действия.
 - **`ExchangeRulesService` (3.2):** (Зависимость) Для `getRules()`.
-- **`ConfigService` (1.3):** (Зависимость) Для `getStrategyContext()`.
+- **`IExchangeService` (3.1/3.5):** (Зависимость) Для получения правил биржи и округления.
+- **`ConfigService` (1.3):** (Зависимость) Для `getLocalExecutionBalancePercent()` и получения конфигурации.
 - **`LoggingService` (1.4):** (Зависимость) Для логирования.
-- **`ccxt` (1.2):** (Зависимость) Для импорта типов ошибок (`InsufficientFundsError`).
+- **`ExchangeErrors` (src/errors/ExchangeErrors.ts):** (Зависимость) Для импорта типов ошибок (`InsufficientFundsError`).
+- **`ValidationError` (src/errors/ValidationError.ts):** (Зависимость) Для проверки типа ошибки валидации.
 
 ## 4\. Описание и Нюансы Реализации
 
-### 4.1. Обновление Интерфейсов (`src/interfaces/types.ts`)
+### 4.1. Обновление Интерфейсов (`src/interfaces/IValidatorTypes.ts`)
+
+Типы `LLMDecision`, `LLMAction`, `LLMDecisionParameters` находятся в `src/interfaces/ILLMTypes.ts`. Тип `CalculatedAmounts` находится в `src/interfaces/IValidatorTypes.ts` (вместо `ValidationResult`).
 
 Нам нужны типы для решений LLM (из Задачи 10.5) и для результата `Validator`.
 
-    // src/interfaces/types.ts (Дополнения)
-
-    import { Decimal } from 'decimal.js';
-    import { Order } from 'ccxt';
-    // ... (другие типы)
-
-    // --- Типы Решений (из Задачи 10.5) ---
-
-    export type LLMAction =
-        | 'OPEN_LONG'
-        | 'OPEN_SHORT'
-        | 'CLOSE_POSITION'
-        | 'MODIFY_POSITION'
-        | 'CANCEL_ORDERS'
-        | 'HOLD'; // (HOLD означает пустой массив `decisions`)
-
-    export interface LLMDecisionParameters {
-        type: 'market' | 'limit';
-        price?: Decimal | null;
-        risk_percent?: Decimal | null;
-        stop_loss_price?: Decimal | null;
-        take_profit_price?: Decimal | null;
-        trailing_stop_config?: any | null; // (todo: define TSL config type)
-
-        // (Для CLOSE_POSITION)
-        amount_percent?: Decimal | null;
-
-        // (Для CANCEL_ORDERS)
-        order_id_to_cancel?: string | null; // (null = отменить все по паре)
-
-        // (Для MODIFY_POSITION)
-        new_stop_loss_price?: Decimal | null;
-        new_take_profit_price?: Decimal | null;
-        new_trailing_stop_config?: any | null;
-    }
-
-    export interface LLMDecision {
-        action: LLMAction;
-        pair: string;
-        parameters: LLMDecisionParameters;
-        justification: string;
-    }
-
-    // --- Типы для Worker/Validator ---
-
-    /**
-     * (Результат Валидации, возвращаемый ValidatorService)
-     * (Расширяет CalculatedAmounts из Задачи 6.2)
-     */
-    export interface ValidationResult {
-        // (Из Уровня 2 - 6.2)
-        rawAmountCoin: Decimal;
-        rawAmountUsd: Decimal;
-        usdAtRisk: Decimal;
-        // (Из Уровня 4 - 6.6)
-        roundedAmountCoin: Decimal;
-        roundedAmountUsd: Decimal;
-        roundedPrice: Decimal | null; // (null для market)
-    }
+    // Типы находятся в src/interfaces/ILLMTypes.ts и src/interfaces/IValidatorTypes.ts
+    // Используется CalculatedAmounts из IValidatorTypes.ts вместо ValidationResult
 
 ### 4.2. Создание `src/services/WorkerService.ts`
 
@@ -132,27 +79,56 @@
         private configService: ConfigService;
 
         private constructor(
-            /* ... (инъекция всех 9 зависимостей) ... */
+            validatorService: ValidatorService,
+            executionService: GuaranteedOrderExecutionService,
+            databaseService: DatabaseService,
+            eventBus: EventBusService,
+            notificationService: NotificationService,
+            globalStateService: GlobalStateService,
+            accountStateService: AccountStateService,
+            exchangeRulesService: ExchangeRulesService,
+            exchangeService: IExchangeService,
+            configService: ConfigService
         ) {
-            this.logger = LoggingService.getInstance();
-            this.logger.registerContext("WorkerService");
-            // (Присвоение всех зависимостей)
-            this.validatorService = ValidatorService.getInstance(/*...*/);
-            this.executionService = GuaranteedOrderExecutionService.getInstance();
-            this.dbService = DatabaseService.getInstance(/*...*/);
-            this.eventBus = EventBusService.getInstance();
-            this.notificationService = NotificationService.getInstance(/*...*/);
-            this.globalStateService = GlobalStateService.getInstance();
-            this.accountStateService = AccountStateService.getInstance(/*...*/);
-            this.exchangeRulesService = ExchangeRulesService.getInstance(/*...*/);
-            this.configService = ConfigService.getInstance();
+            this.validatorService = validatorService;
+            this.executionService = executionService;
+            this.databaseService = databaseService;
+            this.eventBus = eventBus;
+            this.notificationService = notificationService;
+            this.globalStateService = globalStateService;
+            this.accountStateService = accountStateService;
+            this.exchangeRulesService = exchangeRulesService;
+            this.exchangeService = exchangeService;
+            this.configService = configService;
+            this.logger = LoggingService.getInstance().getLogger('Worker');
+            this.logger.info('WorkerService initialized.');
         }
 
         public static getInstance(
-            /* ... (все 9 зависимостей) ... */
+            validatorService: ValidatorService,
+            executionService: GuaranteedOrderExecutionService,
+            databaseService: DatabaseService,
+            eventBus: EventBusService,
+            notificationService: NotificationService,
+            globalStateService: GlobalStateService,
+            accountStateService: AccountStateService,
+            exchangeRulesService: ExchangeRulesService,
+            exchangeService: IExchangeService,
+            configService: ConfigService
         ): WorkerService {
             if (!WorkerService.instance) {
-                WorkerService.instance = new WorkerService(/*...*/);
+                WorkerService.instance = new WorkerService(
+                    validatorService,
+                    executionService,
+                    databaseService,
+                    eventBus,
+                    notificationService,
+                    globalStateService,
+                    accountStateService,
+                    exchangeRulesService,
+                    exchangeService,
+                    configService
+                );
             }
             return WorkerService.instance;
         }
@@ -164,117 +140,291 @@
         public async execute(
             decision: LLMDecision,
             llm_decision_log_id: string,
-            // (Данные, необходимые для Validator, см. Раздел 2)
             accountState: AccountState,
             strategyContext: StrategyContext,
             marketData: MarketData
         ): Promise<void> {
-
             const pair = decision.pair;
-            this.logger.info(`[${pair}] Worker принял задачу (Log ID: ${llm_decision_log_id.substring(0, 8)}). Action: ${decision.action}`);
+            const logIdShort = llm_decision_log_id.substring(0, 8);
+            this.logger.info(`[${pair}] Worker принял задачу (Log ID: ${logIdShort}). Action: ${decision.action}`);
 
-            let validationResult: ValidationResult | null = null;
+            let validationResult: CalculatedAmounts | null = null;
 
             // --- Шаг 1: ВАЛИДАЦИЯ ---
             try {
-                const exchangeRules = this.exchangeRulesService.getRules(pair);
+                // HOLD не требует валидации
+                if (decision.action === 'HOLD') {
+                    this.logger.debug(`[${pair}] Action: HOLD. Валидация не требуется.`);
+                } else {
+                    const exchangeRules = this.exchangeRulesService.getRules(pair);
 
-                // (Критично) Вызов Валидатора (Эпик 6)
-                validationResult = this.validatorService.validateDecision(
-                    decision,
-                    accountState,
-                    strategyContext,
-                    marketData,
-                    exchangeRules
-                );
-                this.logger.debug(`[${pair}] Валидация Успешна. Rounded Amount: ${validationResult.roundedAmountCoin}`);
+                    // Вызов Валидатора
+                    validationResult = this.validatorService.validateDecision(
+                        decision,
+                        accountState,
+                        strategyContext,
+                        marketData,
+                        exchangeRules
+                    );
+                    this.logger.debug(
+                        `[${pair}] Валидация успешна. Rounded Amount: ${validationResult.roundedAmountCoin.toString()}`,
+                    );
+                }
+            } catch (validationError) {
+                // Провал Валидации
+                const errorMessage = validationError instanceof Error ? validationError.message : String(validationError);
+                this.logger.error(`[${pair}] ПРОВАЛ ВАЛИДАЦИИ: ${errorMessage}`);
 
-            } catch (validationError: any) {
-                // (Провал Валидации)
-                this.logger.error(`[${pair}] ПРОВАЛ ВАЛИДАЦИИ: ${validationError.message}`);
-                // (Обновляем лог в БД)
-                await this._updateDecisionLog(
-                    llm_decision_log_id,
-                    'rejected_by_validator',
-                    validationError.message,
-                    null
-                );
-                // (Отправляем PUSH)
-                this.notificationService.sendAlert(
-                    `[${pair}] РЕШЕНИЕ ОТКЛОНЕНО: ${validationError.message}`
-                );
-                return; // (Остановка)
+                // Проверяем, является ли это ошибкой превышения баланса для действий OPEN_LONG/OPEN_SHORT
+                const isBalanceError =
+                    validationError instanceof ValidationError &&
+                    (errorMessage.includes('превышает доступный баланс') || errorMessage.includes('превышает')) &&
+                    (decision.action === 'OPEN_LONG' || decision.action === 'OPEN_SHORT');
+
+                if (isBalanceError) {
+                    // ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитываем размер позиции на основе доступного баланса
+                    this.logger.info(
+                        `[${pair}] Попытка локального выполнения с пересчетом размера позиции на основе доступного баланса`,
+                    );
+
+                    try {
+                        // Получаем доступный баланс и процент для локального выполнения
+                        const availableBalanceDecimal = accountState.available_quote_balance as any;
+                        const localExecutionPercentValue = this.configService.getLocalExecutionBalancePercent();
+                        const localExecutionPercent = new DecimalConstructor(localExecutionPercentValue);
+                        const maxUsdForOrder = availableBalanceDecimal.mul(localExecutionPercent) as DecimalValue;
+
+                        // Получаем цену входа
+                        const entryPrice = decision.parameters.price || (marketData.current_price as DecimalValue);
+                        if (!entryPrice) {
+                            throw new Error(`[${pair}] Не удалось определить цену входа для локального выполнения`);
+                        }
+
+                        const entryPriceDecimal = entryPrice as any;
+
+                        // Получаем или устанавливаем автоматически цену стоп-лосса (10% от суммы покупки)
+                        let stopLossPrice = decision.parameters.stop_loss_price;
+                        if (!stopLossPrice) {
+                            const slPercent = new DecimalConstructor(10);
+                            const hundred = new DecimalConstructor(100);
+                            if (decision.action === 'OPEN_LONG') {
+                                const slMultiplier = hundred.minus(slPercent).div(hundred) as any;
+                                stopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+                            } else {
+                                const slMultiplier = hundred.plus(slPercent).div(hundred) as any;
+                                stopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+                            }
+                        }
+
+                        // Получаем или устанавливаем автоматически цену тейк-профита (10% от суммы покупки)
+                        let takeProfitPrice = decision.parameters.take_profit_price;
+                        if (!takeProfitPrice) {
+                            const tpPercent = new DecimalConstructor(10);
+                            const hundred = new DecimalConstructor(100);
+                            if (decision.action === 'OPEN_LONG') {
+                                const tpMultiplier = hundred.plus(tpPercent).div(hundred) as any;
+                                takeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+                            } else {
+                                const tpMultiplier = hundred.minus(tpPercent).div(hundred) as any;
+                                takeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+                            }
+                        }
+
+                        // Рассчитываем дистанцию до стопа
+                        const stopLossPriceDecimal = stopLossPrice as any;
+                        const distanceToStop = entryPriceDecimal.sub(stopLossPriceDecimal).abs() as DecimalValue;
+                        const zero = new DecimalConstructor(0);
+                        const distanceDecimal = distanceToStop as any;
+                        if (distanceDecimal.isZero() || distanceDecimal.eq(zero)) {
+                            throw new Error(`[${pair}] Дистанция до стопа равна нулю, локальное выполнение невозможно`);
+                        }
+
+                        // Рассчитываем максимальное количество монет на основе доступного баланса
+                        const maxAmountCoin = maxUsdForOrder.div(entryPriceDecimal) as DecimalValue;
+
+                        // Округляем amount по правилам биржи
+                        const exchangeRules = this.exchangeRulesService.getRules(pair);
+                        const precision = exchangeRules.precision;
+                        const maxAmountCoinDecimal = maxAmountCoin as any;
+                        const amountPrecisionDecimal = precision.amount as any;
+                        const amountPrecisionE = amountPrecisionDecimal.e !== undefined ? Math.abs(amountPrecisionDecimal.e) : 0;
+                        const amountMultiplier = new DecimalConstructor(10).pow(amountPrecisionE);
+                        const roundedAmountCoin = maxAmountCoinDecimal.mul(amountMultiplier).floor().div(amountMultiplier) as DecimalValue;
+
+                        // Пересчитываем стоимость ордера
+                        const roundedAmountCoinDecimal = roundedAmountCoin as any;
+                        const roundedAmountUsd = roundedAmountCoinDecimal.mul(entryPriceDecimal) as DecimalValue;
+
+                        // Рассчитываем реальный USD@Risk
+                        const recalculatedUsdAtRisk = roundedAmountCoinDecimal.mul(distanceDecimal) as DecimalValue;
+
+                        // Пересчитываем цены SL/TP пропорционально изменению размера позиции
+                        // (Сохранение процентного расстояния до SL/TP относительно цены входа)
+                        const hundred = new DecimalConstructor(100);
+                        const originalStopLossPriceDecimal = stopLossPrice as any;
+                        const originalTakeProfitPriceDecimal = takeProfitPrice as any;
+                        const slDistancePercentDecimal = entryPriceDecimal.sub(originalStopLossPriceDecimal).abs().div(entryPriceDecimal).mul(hundred) as any;
+                        const tpDistancePercentDecimal = originalTakeProfitPriceDecimal.sub(entryPriceDecimal).abs().div(entryPriceDecimal).mul(hundred) as any;
+
+                        let recalculatedStopLossPrice: number;
+                        let recalculatedTakeProfitPrice: number;
+                        if (decision.action === 'OPEN_LONG') {
+                            const slMultiplier = hundred.minus(slDistancePercentDecimal).div(hundred) as any;
+                            const tpMultiplier = hundred.plus(tpDistancePercentDecimal).div(hundred) as any;
+                            recalculatedStopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+                            recalculatedTakeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+                        } else {
+                            const slMultiplier = hundred.plus(slDistancePercentDecimal).div(hundred) as any;
+                            const tpMultiplier = hundred.minus(tpDistancePercentDecimal).div(hundred) as any;
+                            recalculatedStopLossPrice = entryPriceDecimal.mul(slMultiplier).toNumber();
+                            recalculatedTakeProfitPrice = entryPriceDecimal.mul(tpMultiplier).toNumber();
+                        }
+
+                        // Обновляем параметры решения с пересчитанными ценами SL/TP
+                        decision.parameters.stop_loss_price = recalculatedStopLossPrice;
+                        decision.parameters.take_profit_price = recalculatedTakeProfitPrice;
+
+                        // Проверяем minNotional
+                        const minNotionalDecimal = exchangeRules.minNotional as any;
+                        const roundedAmountUsdDecimal = roundedAmountUsd as any;
+                        if (roundedAmountUsdDecimal.lt(minNotionalDecimal)) {
+                            this.logger.warn(`[${pair}] После пересчета размер позиции ниже биржевого минимума. Локальное выполнение невозможно.`);
+                        } else if (roundedAmountCoinDecimal.isZero() || roundedAmountCoinDecimal.eq(zero)) {
+                            this.logger.warn(`[${pair}] После пересчета размер позиции стал 0. Локальное выполнение невозможно.`);
+                        } else {
+                            // Создаем модифицированный validationResult для локального выполнения
+                            const localValidationResult: CalculatedAmounts = {
+                                rawAmountCoin: roundedAmountCoin,
+                                rawAmountUsd: roundedAmountUsd,
+                                roundedAmountCoin: roundedAmountCoin,
+                                roundedAmountUsd: roundedAmountUsd,
+                                roundedEntryPrice: entryPrice,
+                                usdAtRisk: recalculatedUsdAtRisk,
+                                entryPrice: entryPrice,
+                            };
+
+                            this.logger.info(
+                                `[${pair}] ✅ ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитанный размер позиции ${roundedAmountCoinDecimal.toString()} монет ($${roundedAmountUsdDecimal.toFixed(2)}), реальный риск: $${recalculatedUsdAtRisk.toFixed(2)}`,
+                            );
+
+                            // Обновляем лог в БД с пометкой о локальном выполнении
+                            await this._updateDecisionLog(
+                                llm_decision_log_id,
+                                'rejected_by_validator',
+                                `${errorMessage} [ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Пересчитан размер до $${roundedAmountUsdDecimal.toFixed(2)}]`,
+                                null,
+                            );
+
+                            // Отправляем уведомление о локальном выполнении
+                            this.notificationService.sendAlert(
+                                `[${pair}] ⚠️ ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ: Решение было отклонено валидатором из-за превышения баланса, но выполняется с пересчитанным размером $${roundedAmountUsdDecimal.toFixed(2)}`,
+                                false,
+                            );
+
+                            // Переходим к выполнению с пересчитанным размером
+                            validationResult = localValidationResult;
+                        }
+                    } catch (localExecutionError) {
+                        const localErrorMessage = localExecutionError instanceof Error ? localExecutionError.message : String(localExecutionError);
+                        this.logger.error(`[${pair}] ОШИБКА ЛОКАЛЬНОГО ВЫПОЛНЕНИЯ: ${localErrorMessage}`);
+                    }
+                }
+
+                // Если не было локального выполнения или оно не удалось, продолжаем стандартную обработку отклонения
+                if (!validationResult) {
+                    // Обновляем лог в БД
+                    await this._updateDecisionLog(llm_decision_log_id, 'rejected_by_validator', errorMessage, null);
+
+                    // Отправляем уведомление
+                    this.notificationService.sendAlert(`[${pair}] РЕШЕНИЕ ОТКЛОНЕНО: ${errorMessage}`, false);
+
+                    return; // Остановка
+                }
+                // Если validationResult был установлен (локальное выполнение успешно), продолжаем выполнение
             }
 
             // --- Шаг 2: ИСПОЛНЕНИЕ ---
             try {
-                // (Передаем validationResult, т.к. там уже рассчитаны все суммы)
+                // Передаем validationResult, т.к. там уже рассчитаны все суммы
                 switch (decision.action) {
                     case 'OPEN_LONG':
                     case 'OPEN_SHORT':
-                        await this.handleOpenPosition(decision, validationResult);
+                        await this.handleOpenPosition(decision, validationResult!);
+                        // Обновляем кэш AccountStateService после открытия позиции
+                        try {
+                            await this.accountStateService.refreshNow();
+                            this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после открытия позиции`);
+                        } catch (error) {
+                            this.logger.error(`[${pair}] Ошибка при обновлении кэша после открытия позиции:`, error);
+                        }
                         break;
 
                     case 'CLOSE_POSITION':
-                        await this.handleClosePosition(decision, validationResult);
+                        await this.handleClosePosition(decision, validationResult!);
+                        // Обновляем кэш AccountStateService после закрытия позиции
+                        try {
+                            await this.accountStateService.refreshNow();
+                            this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после закрытия позиции`);
+                        } catch (error) {
+                            this.logger.error(`[${pair}] Ошибка при обновлении кэша после закрытия позиции:`, error);
+                        }
                         break;
 
                     case 'MODIFY_POSITION':
-                        await this.handleModifyPosition(decision, validationResult);
+                        await this.handleModifyPosition(decision, validationResult!);
+                        // Обновляем кэш AccountStateService после модификации позиции
+                        try {
+                            await this.accountStateService.refreshNow();
+                            this.logger.debug(`[${pair}] Кэш AccountStateService обновлен после модификации позиции`);
+                        } catch (error) {
+                            this.logger.error(`[${pair}] Ошибка при обновлении кэша после модификации позиции:`, error);
+                        }
                         break;
 
                     case 'CANCEL_ORDERS':
-                        await this.handleCancelOrders(decision, validationResult);
+                        await this.handleCancelOrders(decision, validationResult!);
                         break;
                 }
 
-                // (Успех)
+                // Успех
                 this.logger.info(`[${pair}] Исполнение УСПЕШНО: ${decision.action}`);
 
                 // (Задача 7.1.3: Публикация События)
                 this.eventBus.emit('trade_executed', pair);
 
-                // (Обновляем лог в БД)
+                // Обновляем лог в БД
                 await this._updateDecisionLog(llm_decision_log_id, 'accepted', null, null);
 
-                // (Отправляем PUSH)
+                // Отправляем PUSH
                 this.notificationService.sendAlert(
                     `[${pair}] ИСПОЛНЕНО: ${decision.action} (Justification: ${decision.justification})`,
-                    true // (Включить AccountState)
+                    true, // Включить AccountState
                 );
+            } catch (executionError) {
+                // Провал Исполнения
+                const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);
+                this.logger.fatal(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА ИСПОЛНЕНИЯ: ${errorMessage}`);
 
-            } catch (executionError: any) {
-                // (Провал Исполнения)
-                this.logger.fatal(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА ИСПОЛНЕНИЯ: ${executionError.message}`);
+                // Обновляем лог в БД
+                await this._updateDecisionLog(llm_decision_log_id, 'failed_by_worker', null, errorMessage);
 
-                // (Обновляем лог в БД)
-                 await this._updateDecisionLog(
-                    llm_decision_log_id,
-                    'failed_by_worker',
-                    null,
-                    executionError.message
-                );
+                // Отправляем PUSH
+                this.notificationService.sendAlert(`[${pair}] ОШИБКА ИСПОЛНЕНИЯ: ${errorMessage}`, true);
 
-                // (Отправляем PUSH)
-                this.notificationService.sendAlert(
-                    `[${pair}] ОШИБКА ИСПОЛНЕНИЯ: ${executionError.message}`,
-                    true // (Включить AccountState)
-                );
-
-                // (Специальная обработка InsufficientFunds - План 7.1)
-                if (executionError instanceof ccxt.InsufficientFundsError) {
+                // Специальная обработка InsufficientFunds
+                if (executionError instanceof InsufficientFundsError) {
                     this.logger.fatal(`[${pair}] InsufficientFundsError! Активация Глобальной Паузы.`);
                     this.notificationService.sendAlert(
                         `[FATAL] НЕДОСТАТОЧНО СРЕДСТВ! Бот ПРИОСТАНОВЛЕН. Требуется ручное вмешательство.`,
-                        true
+                        true,
                     );
-                    // (Ставим на паузу)
+                    // Ставим на паузу
                     this.globalStateService.pause();
-                    // (Принудительно обновляем кэш баланса)
+                    // Принудительно обновляем кэш баланса
                     await this.accountStateService.refreshNow();
                 }
 
-                // (Пробрасываем ошибку выше, чтобы PairActorManager ее "увидел")
+                // Пробрасываем ошибку выше, чтобы PairActorManager ее "увидел"
                 throw executionError;
             }
         }
@@ -289,7 +439,7 @@
             workerError: string | null
         ): Promise<void> {
             try {
-                await this.dbService.query(
+                await this.databaseService.query(
                     `UPDATE LLM_Decision_Log
                      SET
                         decision_result = $2,
@@ -298,33 +448,34 @@
                      WHERE id = $1`,
                     [logId, status, validatorError, workerError]
                 );
-            } catch (dbError: any) {
-                this.logger.error(`[FATAL] Не удалось обновить LLM_Decision_Log (ID: ${logId}): ${dbError.message}`);
+            } catch (dbError) {
+                const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
+                this.logger.error(`[FATAL] Не удалось обновить LLM_Decision_Log (ID: ${logId}): ${errorMessage}`);
             }
         }
 
         // --- (ЗАГЛУШКИ: Будут реализованы в 7.2 - 7.5) ---
 
-        private async handleOpenPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async handleOpenPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<IDecimalOrder | null> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleOpenPosition...`);
             // (Логика Задачи 7.2 / 7.2.1 будет здесь)
-            // (e.g., this.dbService.executeInTransaction(async (client) => { ... }))
+            // (e.g., this.databaseService.executeInTransaction(async (client) => { ... }))
             return null;
         }
 
-        private async handleClosePosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async handleClosePosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<IDecimalOrder | null> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleClosePosition...`);
             // (Логика Задачи 7.3 / 7.3.1 будет здесь)
             return null;
         }
 
-        private async handleModifyPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async handleModifyPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<IDecimalOrder | null> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleModifyPosition...`);
             // (Логика Задачи 7.4 будет здесь)
             return null;
         }
 
-        private async handleCancelOrders(decision: LLMDecision, validationResult: ValidationResult): Promise<void> {
+        private async handleCancelOrders(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleCancelOrders...`);
             // (Логика Задачи 7.5 будет здесь)
         }

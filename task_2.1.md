@@ -120,6 +120,7 @@ _Хранит условия, по которым "Наблюдатель" до�
     );
 
     CREATE INDEX idx_tradehistory_pair_timestamp ON TradeHistory(pair, timestamp);
+    CREATE INDEX idx_tradehistory_exchange_trade_id ON TradeHistory(exchange_trade_id);
 
 ### 4.6. `LLM_Decision_Log`
 
@@ -153,4 +154,5 @@ _"Черный ящик" (аудит) для каждого вызова LLM (с
 4.  **\[Время\]** Все столбцы `..._at` или `timestamp` используют тип `TIMESTAMPTZ`.
 5.  **\[Спецификация 2.1\]** Таблица `ActiveOrders` содержит `nullable` столбцы: `target_stop_loss_price`, `target_take_profit_price` и `target_trailing_stop_json`.
 6.  **\[Спецификация 2.4\]** Таблица `LLM_Decision_Log` реализована в соответствии со схемой, описанной в п. 4.6.
-7.  **\[Корректность\]** DDL-скрипт синтаксически корректен для PostgreSQL и выполняется без ошибок.
+7.  **\[Индексы\]** Для таблицы `TradeHistory` создан дополнительный индекс `idx_tradehistory_exchange_trade_id` на поле `exchange_trade_id` для быстрого поиска по ID сделки с биржи.
+8.  **\[Корректность\]** DDL-скрипт синтаксически корректен для PostgreSQL и выполняется без ошибок.

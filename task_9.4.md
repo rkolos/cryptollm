@@ -20,44 +20,13 @@
 
 `WatcherOrchestrator` отвечает за _всю_ цепочку: Сборка запроса -> Вызов LLM -> Сохранение триггеров -> Вызов Worker.
 
-1.  **Удаление Внутренних Блокировок (Критично):**
-    - Разработчик должен найти и **полностью удалить** любые `in-memory` флаги или механизмы блокировок, которые ранее планировались для `WatcherOrchestrator`.
-    - **Пример удаляемого кода:**
+1.  **Отсутствие Внутренних Блокировок (Критично):**
+    - `WatcherOrchestratorService` **не содержит** никаких `in-memory` флагов или механизмов блокировок (например, `isCallingLLM` map).
+    - Метод `executeOrchestration(pair: string, triggerReason: string)` использует `pairActorManager.execute(pair, async () => { ... })` **БЕЗ** `await` (fire-and-forget) для оборачивания всей логики оркестрации.
+    - Вся логика оркестрации находится внутри `pairActorManager.execute`: сборка запроса (4.6), вызов LLM (3.3 / 3.4), запись аудита (2.4), сохранение триггеров (5.6), вызов `WorkerService.execute` (7.1), принудительная синхронизация (5.6).
+    - Обработка ошибок выполняется через `.catch()` на Promise от `pairActorManager.execute`, логирование и отправка уведомлений при критических ошибках.
 
-      // ... (внутри WatcherOrchestrator)
-
-      // ЭТОТ КОД ДОЛЖЕН БЫТЬ УДАЛЕН:
-      // private readonly isCallingLLM: Map<string, boolean> = new Map();
-
-      public async executeLLMCall(pair: string, reason: string): Promise<void> {
-      // ЭТА ПРОВЕРКА ДОЛЖНА БЫТЬ УДАЛЕНА:
-      // if (this.isCallingLLM.get(pair)) {
-      // this.logger.warn(`[${pair}] Вызов LLM уже в процессе. Новый триггер "${reason}" проигнорирован.`);
-      // return;
-      // }
-
-          // ЭТИ ФЛАГИ ДОЛЖНЫ БЫТЬ УДАЛЕНЫ:
-          // this.isCallingLLM.set(pair, true);
-
-          try {
-              // ... (Вся основная логика остается)
-              // 1. Сборка запроса (4.6)
-              // 2. Вызов LLM (3.3 / 3.4)
-              // 3. Запись Аудита (2.4)
-              // 4. Сохранение триггеров (5.6)
-              // 5. Вызов WorkerService.execute (7.1)
-              // 6. Принудительная Синхронизация (5.6)
-
-          } catch (error) {
-              // ...
-          } finally {
-              // ЭТОТ ФЛАГ ДОЛЖЕН БЫТЬ УДАЛЕН:
-              // this.isCallingLLM.set(pair, false);
-          }
-
-      }
-
-2.  **Обоснование:** Логика `isCallingLLM` теперь **внешняя**. `PairActorManagerService` не позволит второму `executeLLMCall` запуститься, пока первый не завершится, что делает внутреннюю блокировку ненужной и вредной (она может привести к "пропущенным" триггерам).
+2.  **Обоснование:** Логика управления конкурентностью теперь **внешняя**. `PairActorManagerService` не позволит второму `executeOrchestration` запуститься, пока первый не завершится, что делает внутреннюю блокировку ненужной и вредной (она может привести к "пропущенным" триггерам). `PairActorManager` также гарантирует, что задачи для одной пары выполняются последовательно.
 
 ### 3.2. Модификация `WorkerService` (Задача 7.1)
 
@@ -69,7 +38,8 @@
 
 ## 4\. Критерии Приемки (Acceptance Criteria)
 
-1.  **\[WatcherOrchestrator (Критично)\]** Из `WatcherOrchestrator` (Задача 5.6) **полностью удалена** любая внутренняя логика блокировок (e.g., `isCallingLLM` map).
-2.  **\[WatcherOrchestrator\]** `executeLLMCall` теперь содержит _только_ бизнес-логику (Сборка -> Вызов -> Worker -> Синхронизация).
-3.  **\[WorkerService\]** `WorkerService` (Задача 7.1) **не содержит** никакой внутренней логики блокировок.
-4.  **\[Подтверждение\]** Вся логика управления конкурентностью для `WatcherOrchestrator` и `WorkerService` теперь управляется _исключительно_ `PairActorManagerService` через вызовы в `SlowCycleService` (9.2) и `FastCycleService` (9.3).
+1.  **\[WatcherOrchestrator (Критично)\]** `WatcherOrchestratorService` **не содержит** никакой внутренней логики блокировок (e.g., `isCallingLLM` map).
+2.  **\[WatcherOrchestrator\]** `executeOrchestration(pair, triggerReason)` содержит _только_ бизнес-логику, обернутую в `pairActorManager.execute(pair, async () => { ... })` **БЕЗ** `await` (fire-and-forget): Сборка запроса -> Вызов LLM -> Запись аудита -> Сохранение триггеров -> Вызов Worker -> Синхронизация.
+3.  **\[WatcherOrchestrator\]** Обработка ошибок выполняется через `.catch()` на Promise от `pairActorManager.execute`, логирование и отправка уведомлений при критических ошибках.
+4.  **\[WorkerService\]** `WorkerService` (Задача 7.1) **не содержит** никакой внутренней логики блокировок. Комментарии в коде указывают, что метод `execute()` вызывается из `WatcherOrchestrator` внутри `PairActorManager`.
+5.  **\[Подтверждение\]** Вся логика управления конкурентностью для `WatcherOrchestrator` и `WorkerService` теперь управляется _исключительно_ `PairActorManagerService` через вызовы в `SlowCycleService` (9.2), `FastCycleService` (9.3) и `PriceTriggerHandler` (9.3).

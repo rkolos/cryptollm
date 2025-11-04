@@ -37,7 +37,7 @@
     DB_HOST="localhost"
     DB_PORT="5432"
     DB_USER="trader_user"
-    DB_PASS="trader_pass"
+    DB_PASSWORD="trader_pass"
     DB_NAME="trader_db"
 
     # 4. Watchlist (через запятую, без пробелов)
@@ -46,20 +46,33 @@
     # 5. LLM API
     LLM_API_URL="http://localhost:8080/v1/chat/completions"
     LLM_API_KEY="your_llm_api_key_if_needed"
+    LLM_MODEL_NAME="gpt-4"  # Опционально, имя модели LLM
 
     # 6. Notifications (Telegram)
     TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
     TELEGRAM_CHAT_ID="YOUR_TELEGRAM_CHAT_ID"
 
-    # 7. Strategy Context (Категория 4)
+    # 7. Strategy Context
+    # Вариант 1: JSON формат (рекомендуется)
+    STRATEGY_CONTEXT='{"role":"Ты — профессиональный риск-менеджер и помощник трейдера","style":"Консервативный свинг-трейдер"}'
+    # Вариант 2: Legacy формат (используется как fallback, если STRATEGY_CONTEXT не задан)
     STRATEGY_ROLE="Ты — профессиональный риск-менеджер и помощник трейдера."
     STRATEGY_STYLE="Ты — консервативный свинг-трейдер. Фокусируйся на старших таймфреймах."
 
-    # 8. Risk Rules (Категория 4)
+    # 8. Risk Rules
+    # Вариант 1: JSON формат (рекомендуется)
+    RISK_RULES='{"default_risk_per_trade_percent":1.5,"max_allowed_risk_per_trade_percent":3.0,"max_total_portfolio_risk_percent":10.0,"desired_risk_reward_ratio":3.0}'
+    # Вариант 2: Legacy формат (используется как fallback, если RISK_RULES не задан)
     RISK_DEFAULT_PERCENT="1.0"
     RISK_MAX_PER_TRADE_PERCENT="2.0"
     RISK_MAX_TOTAL_PORTFOLIO_PERCENT="10.0"
     RISK_DESIRED_RR_RATIO="3.0"
+
+    # 9. Dry Run Configuration
+    DRY_RUN_INITIAL_USDT="10000"  # Опционально, начальный баланс для dry_run режима (по умолчанию 10000)
+
+    # 10. Worker Configuration
+    WORKER_LOCAL_EXECUTION_BALANCE_PERCENT="0.1"  # Опционально, процент баланса для локального выполнения (0.0-1.0, по умолчанию 0.1)
 
 ### 3.2. `src/services/ConfigService.ts`
 
@@ -70,12 +83,16 @@
 Внутри сервиса должна быть определена схема `zod` (`configSchema`), которая описывает ВСЕ переменные из `.env.example`.
 
 - **Нюанс:** Числовые значения (например, `DB_PORT`, `RISK_...`) должны быть определены с использованием `z.coerce.number()`, чтобы `zod` автоматически преобразовал строку из `.env` в тип `number`.
+- **Нюанс:** `DB_PORT` должен использовать `.int().positive()` для строгой валидации целого положительного числа.
 - **Нюанс:** `APP_MODE` должен использовать `z.enum(['production', 'testnet', 'dry_run'])`.
-- **Нюанс:** `LLM_API_URL` и `LLM_API_KEY` могут быть опциональными (`.optional()`), так как `MockLLMService` (Задача 3.3) не будет их использовать.
+- **Нюанс:** `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME` могут быть опциональными (`.optional()`), так как `MockLLMService` (Задача 3.3) не будет их использовать.
+- **Нюанс:** `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` опциональны, так как уведомления могут быть отключены.
+- **Нюанс:** `STRATEGY_CONTEXT` и `RISK_RULES` опциональны и могут быть заданы в JSON формате. Если они не заданы, используются legacy переменные (`STRATEGY_ROLE`, `STRATEGY_STYLE`, `RISK_DEFAULT_PERCENT` и т.д.).
+- **Нюанс:** `DB_PASSWORD` используется вместо `DB_PASS` для согласованности с современными практиками именования.
 
 #### 3.2.2. Реализация Singleton
 
-Класс должен иметь `private static instance: ConfigService` и `public static getInstance(): ConfigService` для обеспечения единственного экземпляра.
+Класс должен иметь `private static instance: ConfigService | undefined` и `public static getInstance(): ConfigService` для обеспечения единственного экземпляра. Поле `instance` может быть `undefined` до вызова `load()`.
 
 #### 3.2.3. Метод `load()`
 
@@ -86,14 +103,28 @@
   2.  Обернуть `configSchema.parse(process.env)` в `try...catch`.
   3.  **При успехе:** Сохранить типизированный и валидированный объект `config` в `private` свойстве экземпляра Singleton.
   4.  **При ошибке (провал валидации):**
-      - **Критично:** Вывести ошибку валидации `zod` в лог (`console.error`). Ошибка `zod` детально покажет, каких переменных не хватает или какие имеют неверный тип.
+      - **Критично:** Вывести ошибку валидации `zod` в лог (`console.error`). Для каждой ошибки валидации должен выводиться путь (path) и сообщение (message) для удобства отладки. Ошибка `zod` детально покажет, каких переменных не хватает или какие имеют неверный тип.
       - **Критично:** Принудительно завершить работу приложения: `process.exit(1)`. Это предотвратит запуск бота в некорректной или небезопасной конфигурации.
 
 #### 3.2.4. Геттеры (Getters)
 
 - Сервис не должен предоставлять доступ ко всему объекту `config` напрямую.
 - Должны быть созданы типизированные геттеры для каждой группы настроек.
-- **Нюанс для `getWatchlist()`:** Этот геттер должен возвращать `string[]`, а не строку. Он должен парсить строку из `config.WATCHLIST.split(',')`.
+- **Нюанс для `getWatchlist()`:** Этот геттер должен возвращать `string[]`, а не строку. Он должен парсить строку из `config.WATCHLIST.split(',').map(pair => pair.trim()).filter(pair => pair.length > 0)` для удаления пробелов и пустых значений.
+- **Нюанс для `getDbConfig()`:** Геттер должен возвращать объект с полем `password` (из `DB_PASSWORD`), а не `DB_PASS`.
+- **Нюанс для `getStrategyContext()`:** Геттер должен поддерживать несколько форматов:
+  - Если `APP_MODE` равен `'testnet'` или `'dry_run'`, возвращается агрессивный профиль: `{ role: 'aggressive_trader', style: 'high_frequency_swing' }`.
+  - Если задан `STRATEGY_CONTEXT` (JSON строка), она парсится и возвращается. При ошибке парсинга используется fallback к legacy формату.
+  - В противном случае используется legacy формат из `STRATEGY_ROLE` и `STRATEGY_STYLE`.
+- **Нюанс для `getRiskRules()`:** Геттер должен поддерживать несколько форматов:
+  - Если `APP_MODE` равен `'testnet'` или `'dry_run'`, возвращаются агрессивные настройки: `{ defaultRiskPercent: 20.0, maxAllowedRiskPercent: 50.0, maxTotalPortfolioRiskPercent: 100.0, desiredRiskRewardRatio: 1.0 }`.
+  - Если задан `RISK_RULES` (JSON строка), она парсится и возвращается с преобразованием ключей в camelCase. При ошибке парсинга используется fallback к legacy формату.
+  - В противном случае используется legacy формат из отдельных переменных `RISK_*`.
+- **Дополнительные геттеры:**
+  - `getDryRunInitialBalance(): number` - возвращает `DRY_RUN_INITIAL_USDT` или `10000` по умолчанию.
+  - `getSlowCycleIntervalMs(): number` - возвращает интервал медленного цикла в миллисекундах (по умолчанию `600000`).
+  - `getLocalExecutionBalancePercent(): number` - возвращает процент баланса для локального выполнения (по умолчанию `0.1`).
+  - `getDefaultTriggerTimeoutMinutes(): number` - возвращает дефолтный таймаут триггера в минутах (по умолчанию `30`).
 
 **Пример структуры (неполный):**
 
@@ -157,29 +188,41 @@
           host: this.config.DB_HOST,
           port: this.config.DB_PORT,
           user: this.config.DB_USER,
-          password: this.config.DB_PASS,
+          password: this.config.DB_PASSWORD,
           database: this.config.DB_NAME,
         };
       }
 
       public getWatchlist(): string[] {
-        return this.config.WATCHLIST.split(',');
+        return this.config.WATCHLIST.split(',')
+          .map((pair) => pair.trim())
+          .filter((pair) => pair.length > 0);
       }
 
       public getRiskRules() {
-        return {
-          defaultRiskPercent: this.config.RISK_DEFAULT_PERCENT,
-          maxAllowedRiskPercent: this.config.RISK_MAX_PER_TRADE_PERCENT,
-          maxTotalPortfolioRiskPercent: this.config.RISK_MAX_TOTAL_PORTFOLIO_PERCENT,
-          desiredRiskRewardRatio: this.config.RISK_DESIRED_RR_RATIO,
-        };
+        // Логика с поддержкой демо-счетов и JSON формата (см. реализацию)
+        // ...
       }
 
       public getStrategyContext() {
-         return {
-            role: this.config.STRATEGY_ROLE,
-            style: this.config.STRATEGY_STYLE,
-         };
+        // Логика с поддержкой демо-счетов и JSON формата (см. реализацию)
+        // ...
+      }
+
+      public getDryRunInitialBalance(): number {
+        return this.config.DRY_RUN_INITIAL_USDT ?? 10000;
+      }
+
+      public getSlowCycleIntervalMs(): number {
+        return 600000; // 10 минут
+      }
+
+      public getLocalExecutionBalancePercent(): number {
+        return this.config.WORKER_LOCAL_EXECUTION_BALANCE_PERCENT ?? 0.1;
+      }
+
+      public getDefaultTriggerTimeoutMinutes(): number {
+        return 30;
       }
 
       // ... другие геттеры (getBinanceConfig, getLlmConfig, getTelegramConfig) ...
@@ -197,5 +240,9 @@
 6.  **\[Тест Провала 1 (Отсутствие)\]** Если файл `.env` отсутствует (или в нем не хватает `BINANCE_API_KEY`), `ConfigService.load()` выбрасывает ошибку, выводит в консоль сообщение (например, "BINANCE_API_KEY: Required") и приложение **не запускается** (завершается с кодом 1).
 7.  **\[Тест Провала 2 (Неверный тип)\]** Если в `.env` указано `APP_MODE="wrong_mode"`, `ConfigService.load()` выбрасывает ошибку (например, "Invalid enum value. Expected 'production' | 'testnet' | 'dry_run', received 'wrong_mode'") и приложение **не запускается**.
 8.  **\[Тест Провала 3 (Coerce)\]** Если в `.env` указано `RISK_DEFAULT_PERCENT="abc"`, `ConfigService.load()` выбрасывает ошибку (например, "Expected number, received nan") и приложение **не запускается**.
-9.  **\[Тест Геттера\]** Временный `console.log(ConfigService.getInstance().getWatchlist())` в `index.ts` (после `load()`) корректно выводит массив `['BTC/USDT', 'ETH/USDT']` (а не строку).
+9.  **\[Тест Геттера\]** Временный `console.log(ConfigService.getInstance().getWatchlist())` в `index.ts` (после `load()`) корректно выводит массив `['BTC/USDT', 'ETH/USDT']` (а не строку). Пробелы вокруг запятых должны быть удалены.
 10. **\[Тест Геттера 2\]** Временный `console.log(ConfigService.getInstance().getRiskRules())` выводит объект, где все значения имеют тип `number`.
+11. **\[Тест JSON формата Strategy\]** При задании `STRATEGY_CONTEXT` в JSON формате, `getStrategyContext()` должен корректно парсить и возвращать объект. При ошибке парсинга должен использоваться fallback к legacy формату.
+12. **\[Тест JSON формата Risk\]** При задании `RISK_RULES` в JSON формате, `getRiskRules()` должен корректно парсить и возвращать объект с преобразованными ключами. При ошибке парсинга должен использоваться fallback к legacy формату.
+13. **\[Тест Демо-счетов\]** При `APP_MODE="dry_run"` или `APP_MODE="testnet"`, методы `getStrategyContext()` и `getRiskRules()` должны возвращать агрессивные настройки для быстрого тестирования.
+14. **\[Тест Дополнительных геттеров\]** Методы `getDryRunInitialBalance()`, `getSlowCycleIntervalMs()`, `getLocalExecutionBalancePercent()`, `getDefaultTriggerTimeoutMinutes()` должны возвращать корректные значения или значения по умолчанию.

@@ -11,7 +11,7 @@
 ## 2\. Зависимости Задачи
 
 - **`ValidatorService.ts` (6.6):** (Модифицируемый) Файл, в который добавляется новая логика.
-- **`ExchangeRulesService` (3.2):** (Зависимость) Используется для получения правил `limits.cost.min` (`minNotional`).
+- **`ExchangeRulesService` (3.2):** (Зависимость) Используется для получения правил через `getRules(pair)` (`minNotional`, `takerFee`).
 - **`decimal.js` (1.2):** (Зависимость)
 - **Типы (Types):** `AccountState`, `CalculatedAmounts`.
 
@@ -29,22 +29,24 @@
     export class ValidatorService {
         // ... (instance, logger, exchangeRules, constructor, getInstance из 6.1)
 
-        public validateAndCalculate(
+        public validateDecision(
             decision: LLMDecision,
             accountState: AccountState,
+            strategyContext: StrategyContext,
             marketData: MarketData,
-            riskRules: RiskRules
+            _exchangeRules: IMarketRules
         ): CalculatedAmounts {
 
             // ... (Код Уровня 1, 2, 3 и 'return' для не-OPEN действий из 6.6)
 
             // === УРОВЕНЬ 2 (Реализован в 6.2) ===
-            const { rawAmountCoin, rawAmountUsd, usdAtRisk } = this._calculatePositionSizing(
-                decision, entryPrice, accountState, riskRules
+            const calculatedAmounts = this._calculatePositionSizing(
+                decision, accountState, strategyContext, entryPrice
             );
+            const { rawAmountCoin, rawAmountUsd, usdAtRisk } = calculatedAmounts;
 
             // === УРОВЕНЬ 3 (Реализован в 6.3) ===
-            this._validatePortfolioRisk(usdAtRisk, accountState, riskRules);
+            this._validatePortfolioRisk(usdAtRisk, accountState, strategyContext);
 
             // === УРОВЕНЬ 4 (Часть 1 - Реализован в 6.6) ===
             const { roundedAmountCoin, roundedAmountUsd, roundedEntryPrice } = this._validateAndRoundPrecision(
@@ -96,43 +98,40 @@
          */
         private _validateExchangeAndBalanceRules(
             pair: string,
-            roundedAmountUsd: Decimal,
-            usdAtRisk: Decimal,
+            roundedAmountUsd: DecimalValue,
+            usdAtRisk: DecimalValue,
             accountState: AccountState
         ): void {
-
             // 1. Получаем правила биржи (minNotional)
-            const limits = this.exchangeRules.getLimits(pair);
-            if (!limits || !limits.cost || !limits.cost.min) {
-                this.logger.error(`[${pair}] НЕ УДАЛОСЬ получить правила лимитов (minNotional).`);
-                throw new ValidationError(`[${pair}] Критическая ошибка: Отсутствуют правила лимитов (minNotional)`);
-            }
-
-            const minNotional = new Decimal(limits.cost.min);
+            const rules = this.exchangeRulesService.getRules(pair);
+            const minNotionalDecimal = rules.minNotional as any;
+            const roundedAmountUsdDecimal = roundedAmountUsd as any;
 
             // 2. (Эта Задача) Проверка MinNotional
-            // if (roundedAmountUsd < minNotional)
-            if (roundedAmountUsd.lessThan(minNotional)) {
+            if (roundedAmountUsdDecimal.lt(minNotionalDecimal)) {
                 throw new ValidationError(
-                    `[${pair}] Рассчитанная стоимость ордера $${roundedAmountUsd.toFixed(2)} ` +
-                    `ниже биржевого минимума $${minNotional.toString()}. ` +
-                    `Увеличьте % риска или дистанцию до стопа.`
+                    `[${pair}] Рассчитанная стоимость ордера $${roundedAmountUsdDecimal.toFixed(2)} ` +
+                        `ниже биржевого минимума $${minNotionalDecimal.toString()}. ` +
+                        `Увеличьте % риска или дистанцию до стопа.`,
                 );
             }
 
             // 3. (Эта Задача) Проверка Баланса
-            const availableBalance = new Decimal(accountState.available_quote_balance);
+            const availableBalanceDecimal = accountState.available_quote_balance as any;
 
-            // if (roundedAmountUsd > availableBalance)
-            if (roundedAmountUsd.greaterThan(availableBalance)) {
+            if (roundedAmountUsdDecimal.gt(availableBalanceDecimal)) {
                 throw new ValidationError(
-                    `[${pair}] Рассчитанная стоимость ордера $${roundedAmountUsd.toFixed(2)} ` +
-                    `превышает доступный баланс $${availableBalance.toFixed(2)}.`
+                    `[${pair}] Рассчитанная стоимость ордера $${roundedAmountUsdDecimal.toFixed(2)} ` +
+                        `превышает доступный баланс $${availableBalanceDecimal.toFixed(2)}.`,
                 );
             }
 
-            // 4. (Заглушка для Задачи 6.5)
-            // this._validateFeeVsRisk(pair, roundedAmountUsd, usdAtRisk);
+            this.logger.debug(
+                `[${pair}] Exchange Rules Check: roundedAmountUsd=${roundedAmountUsdDecimal.toFixed(2)}, minNotional=${minNotionalDecimal.toString()}, availableBalance=${availableBalanceDecimal.toFixed(2)}`,
+            );
+
+            // 4. (Задача 6.5) Вызов проверки Комиссии
+            this._validateFeeVsRisk(pair, roundedAmountUsd, usdAtRisk);
         }
 
         // (Заглушка для Задачи 6.5)
@@ -149,10 +148,12 @@
 
 ## 4\. Критерии Приемки (Acceptance Criteria)
 
-1.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validateExchangeAndBalanceRules`, который принимает `roundedAmountUsd`, `usdAtRisk` и `accountState`.
-2.  **\[Logic (Критично)\]** `_validateExchangeAndBalanceRules` вызывает `this.exchangeRules.getLimits(pair)` и бросает `ValidationError`, если `limits.cost.min` не найден.
-3.  **\[Logic (Критично)\]** `_validateExchangeAndBalanceRules` сравнивает `roundedAmountUsd` (из 6.6) с `minNotional` (из `ExchangeRulesService`) и бросает `ValidationError`, если `roundedAmountUsd.lessThan(minNotional)`.
-4.  **\[Logic (Критично)\]** `_validateExchangeAndBalanceRules` сравнивает `roundedAmountUsd` (из 6.6) с `accountState.available_quote_balance` и бросает `ValidationError`, если `roundedAmountUsd.greaterThan(availableBalance)`.
-5.  **\[Logic\]** Все сравнения (minNotional, balance) выполняются с использованием `decimal.js`.
-6.  **\[Service\]** `validateAndCalculate` (главный метод) теперь вызывает `_validateExchangeAndBalanceRules` (после `_validateAndRoundPrecision`).
-7.  **\[Service\]** `validateAndCalculate` передает в `_validateExchangeAndBalanceRules` _округленную_ `roundedAmountUsd` (из 6.6) и _сырой_ `usdAtRisk` (из 6.2).
+1.  **\[Service\]** В `ValidatorService.ts` добавлен новый приватный метод `_validateExchangeAndBalanceRules(pair, roundedAmountUsd, usdAtRisk, accountState)`, который принимает `DecimalValue` типы.
+2.  **\[Logic (Критично)\]** `_validateExchangeAndBalanceRules` вызывает `this.exchangeRulesService.getRules(pair)` и получает `rules.minNotional` напрямую из объекта rules.
+3.  **\[Logic (Критично)\]** `_validateExchangeAndBalanceRules` сравнивает `roundedAmountUsd` (из 6.6) с `minNotional` (из `ExchangeRulesService`) через `.lt()` и бросает `ValidationError` с информативным сообщением на русском языке, если `roundedAmountUsd.lt(minNotional)`.
+4.  **\[Logic (Критично)\]** `_validateExchangeAndBalanceRules` сравнивает `roundedAmountUsd` (из 6.6) с `accountState.available_quote_balance` через `.gt()` и бросает `ValidationError` с информативным сообщением на русском языке, если `roundedAmountUsd.gt(availableBalance)`.
+5.  **\[Logic\]** Все сравнения (minNotional, balance) выполняются с использованием `decimal.js` и методов `Decimal` (`.lt()`, `.gt()`).
+6.  **\[Debug\]** `_validateExchangeAndBalanceRules` логирует `debug` сообщение с детальной информацией о проверке (roundedAmountUsd, minNotional, availableBalance).
+7.  **\[Service\]** `_validateExchangeAndBalanceRules` вызывает `this._validateFeeVsRisk(pair, roundedAmountUsd, usdAtRisk)` в качестве последнего шага (для Задачи 6.5).
+8.  **\[Service\]** `validateDecision` (главный метод) теперь вызывает `_validateExchangeAndBalanceRules(decision.pair, rounded.roundedAmountUsd, calculatedAmounts.usdAtRisk, accountState)` (после `_validateAndRoundPrecision`).
+9.  **\[Service\]** `validateDecision` передает в `_validateExchangeAndBalanceRules` _округленную_ `roundedAmountUsd` (из 6.6) и _сырой_ `usdAtRisk` (из 6.2).

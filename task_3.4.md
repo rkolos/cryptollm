@@ -58,22 +58,39 @@
     // src/interfaces/ILLMTypes.zod.ts
     import { z } from 'zod';
 
+    // Helper для преобразования null в undefined для optional полей
+    const nullToUndefined = <T extends z.ZodTypeAny>(schema: T) => {
+      return z.preprocess((val) => (val === null ? undefined : val), schema);
+    };
+
     // Схема для LLMDecision (параметры)
-    const parametersSchema = z.object({
-      type: z.enum(['market', 'limit']).optional(),
-      price: z.number().optional(),
-      risk_percent: z.number().optional().nullable(),
-      stop_loss_price: z.number().optional().nullable(),
-      take_profit_price: z.number().optional().nullable(),
-      trailing_stop_config: z.object({
-        type: z.literal('percentage'),
-        distance: z.number(),
-      }).nullable().optional(),
-      amount_percent: z.number().optional(),
-      order_id: z.string().nullable().optional(),
-      new_stop_loss_price: z.number().optional(),
-      new_take_profit_price: z.number().optional(),
-    }).passthrough(); // passthrough() позволяет LLM добавлять доп. поля, не ломая валидацию
+    const parametersSchema = z
+      .object({
+        type: z.enum(['market', 'limit']).optional(),
+        price: nullToUndefined(z.number().optional()), // null преобразуется в undefined
+        risk_percent: z.number().optional().nullable(),
+        stop_loss_price: z.number().optional().nullable(),
+        take_profit_price: z.number().optional().nullable(),
+        trailing_stop_config: z
+          .object({
+            type: z.literal('percentage'),
+            distance: z.number(),
+          })
+          .nullable()
+          .optional(),
+        amount_percent: nullToUndefined(z.number().optional()),
+        order_id: z.string().nullable().optional(),
+        new_stop_loss_price: nullToUndefined(z.number().optional()),
+        new_take_profit_price: nullToUndefined(z.number().optional()),
+        new_trailing_stop_config: z
+          .object({
+            type: z.literal('percentage'),
+            distance: z.number(),
+          })
+          .nullable()
+          .optional(),
+      })
+      .passthrough(); // passthrough() позволяет LLM добавлять доп. поля, не ломая валидацию
 
     // Схема для LLMDecision (одно решение)
     const decisionSchema = z.object({
@@ -87,9 +104,9 @@
     const triggerSchema = z.object({
       type: z.enum(['price', 'indicator', 'timeout']),
       condition: z.string(),
-      value: z.number(),
-      name: z.string().optional(),
-      timeframe: z.string().optional(),
+      value: z.number(), // Обязательное поле - не может быть null
+      name: nullToUndefined(z.string().optional()),
+      timeframe: nullToUndefined(z.string().optional()),
     });
 
     // (Критично) Итоговая схема ответа LLM
@@ -151,13 +168,19 @@
     }
 
     /\*\*
-    - (A) Публичный метод интерфейса \*/ public async ask(payload: LLMRequest): Promise<LLMResponse> { this.logger.info(`Sending request to LLM for [${payload.triggered_pair}]...`);
+    - (A) Публичный метод интерфейса \*/ public async ask(payload: LLMRequest): Promise<LLMResponse> {       // Измеряем время выполнения запроса
+      const startTime = Date.now();
+      this.logger.info(
+        `🚀 [${payload.triggered_pair}] Отправка запроса к LLM (модель: ${this.modelName}, URL: ${this.httpClient.defaults.baseURL})...`,
+      );
 
-      // 2. (Нюанс) Логируем только "безопасные" части запроса
+      // Логируем размер payload и "безопасные" части запроса
+      const payloadSize = JSON.stringify(payload).length;
       this.logger.debug('ProductionLLMService Request Payload:', {
-      pair: payload.triggered_pair,
-      question: payload.question,
-      context: payload.strategy_context?.macro_context
+        pair: payload.triggered_pair,
+        question: payload.question,
+        context: payload.strategy_context?.macro_context,
+        payloadSize,
       });
 
       try {
@@ -173,29 +196,78 @@
 
       // (Критично) Проверка на стандартный OpenAI-совместимый ответ,
       // где JSON-ответ может быть _строкой_ в .content
-      if (responseData.choices && responseData.choices[0]?.message?.content) {
-      try {
-      const content = responseData.choices[0].message.content;
-      // Удаляем потенциальные маркдаун-блоки, если LLM обернул JSON в `json
-      const jsonString = content.replace(/`json\s*|```\s*/g, '').trim();
-      dataToValidate = JSON.parse(jsonString);
-      } catch (jsonParseError) {
-      this.logger.error('Failed to parse JSON from choices.message.content', { content });
-      throw new LLMResponseFormatError('LLM response content was not valid JSON.', jsonParseError, responseData);
-      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseDataTyped = responseData as any;
+      if (responseDataTyped.choices && responseDataTyped.choices[0]?.message?.content) {
+        try {
+          const content = responseDataTyped.choices[0].message.content;
+          // Удаляем потенциальные маркдаун-блоки (```json или ```)
+          const jsonString = content.replace(/```json\s*|```\s*/g, '').trim();
+          dataToValidate = JSON.parse(jsonString);
+        } catch (jsonParseError) {
+          this.logger.error('Failed to parse JSON from choices.message.content', {
+            content: responseDataTyped.choices[0].message.content,
+          });
+          throw new LLMResponseFormatError('LLM response content was not valid JSON.', jsonParseError, responseData);
+        }
       }
 
       const parseResult = llmResponseSchema.safeParse(dataToValidate);
 
       if (!parseResult.success) {
-      this.logger.error('LLM Response validation FAILED.', {
-      errors: parseResult.error.errors,
-      rawData: dataToValidate
-      });
-      throw new LLMResponseFormatError('LLM response format is invalid.', parseResult.error.errors, dataToValidate);
+        // Форматируем ошибки для лучшей читаемости
+        const formattedErrors = parseResult.error.issues.map((issue) => {
+          const base = {
+            path: issue.path.join('.'),
+            message: issue.message,
+            code: issue.code,
+          };
+          // Добавляем информацию о типе для ошибок invalid_type
+          if (issue.code === 'invalid_type') {
+            const invalidTypeIssue = issue as { received?: unknown; expected?: string };
+            return {
+              ...base,
+              received: typeof invalidTypeIssue.received,
+              expected: invalidTypeIssue.expected,
+            };
+          }
+          return base;
+        });
+
+        // Ограничиваем размер rawData для логирования (первые 1000 символов)
+        const rawDataString = JSON.stringify(dataToValidate, null, 2);
+        const truncatedRawData =
+          rawDataString.length > 1000
+            ? rawDataString.substring(0, 1000) + `\n... (truncated, total length: ${rawDataString.length})`
+            : rawDataString;
+
+        this.logger.error('LLM Response validation FAILED.', {
+          errors: formattedErrors,
+          errorCount: parseResult.error.issues.length,
+          rawDataPreview: truncatedRawData,
+        });
+
+        // Логируем каждую ошибку отдельно для лучшей читаемости с фактическими значениями
+        parseResult.error.issues.forEach((issue, index) => {
+          const errorInfo: Record<string, unknown> = {
+            path: issue.path.join('.') || 'root',
+            message: issue.message,
+            code: issue.code,
+          };
+          if (issue.code === 'invalid_type') {
+            // Добавляем фактическое значение для диагностики
+            // ...
+          }
+          this.logger.error(`Validation error ${index + 1}/${parseResult.error.issues.length}:`, errorInfo);
+        });
+
+        throw new LLMResponseFormatError('LLM response format is invalid.', parseResult.error.issues, dataToValidate);
       }
 
-      this.logger.info(`Received and validated LLM response for [${payload.triggered_pair}].`);
+      const validationDuration = Date.now() - startTime;
+      this.logger.info(
+        `✅ [${payload.triggered_pair}] LLM ответ валидирован успешно. Время выполнения: ${validationDuration}ms. Решений: ${parseResult.data.decisions.length}`,
+      );
 
       // 5. (Критично) Возвращаем только провалидированные данные
       return parseResult.data as LLMResponse; // (Тип LLMResponseZod == LLMResponse)
@@ -212,26 +284,57 @@
     /\*\*
     - (B) (Критично) Реализация Exponential Backoff \*/ private async executeRequestWithRetry(payload: LLMRequest): Promise<any> {
 
-      // (НОВОЕ) Формируем тело запроса с указанием модели
+      // Формируем тело запроса в стандартном формате OpenAI-совместимого API
       const requestBody = {
-      // (Нюанс: В реальном коде LLMRequest нужно обернуть в стандартный
-      // формат сообщений: messages: [{role: 'user', content: JSON.stringify(payload)}])
-      // Здесь мы имитируем прямой POST, как в about.md
-      ...payload, // (Оригинальный payload из Watcher)
-      model: this.modelName, // (НОВОЕ: Указание модели)
-      // (Нюанс) Попытаемся запросить JSON-ответ у API
-      response_format: { type: "json_object" }
+        messages: [
+          {
+            role: 'user',
+            content: JSON.stringify(payload), // LLMRequest сериализуется в JSON строку
+          },
+        ],
+        model: this.modelName, // Имя модели из конфигурации
+        response_format: { type: 'json_object' }, // Запрос JSON-ответа от API
       };
 
-      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      try {
-      // (ОБНОВЛЕНО) Отправляем requestBody
-      // Путь /v1/chat/completions является стандартным для многих LLM API
-      const response = await this.httpClient.post('/v1/chat/completions', requestBody);
-      return response.data; // (Вернется полный ответ, `ask` его распарсит)
+      const requestStartTime = Date.now();
+      const payloadSize = JSON.stringify(payload).length;
+      this.logger.info(
+        `📤 [${payload.triggered_pair}] HTTP запрос к LLM API: модель=${this.modelName}, размер payload=${payloadSize} символов`,
+      );
 
-      } catch (error: any) {
-      const axiosError = error as AxiosError;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        const attemptStartTime = Date.now();
+        try {
+          if (attempt === 0) {
+            this.logger.info(`📡 [${payload.triggered_pair}] Отправка POST /v1/chat/completions к LLM API...`);
+          } else {
+            this.logger.info(
+              `📡 [${payload.triggered_pair}] Повторная попытка ${attempt + 1}/${MAX_RETRIES}: отправка POST /v1/chat/completions...`,
+            );
+          }
+
+          // Путь /v1/chat/completions является стандартным для OpenAI-совместимых API
+          const response = await this.httpClient.post('/v1/chat/completions', requestBody);
+          const attemptDuration = Date.now() - attemptStartTime;
+          const totalDuration = Date.now() - requestStartTime;
+
+          if (attempt > 0) {
+            this.logger.info(
+              `✅ [${payload.triggered_pair}] LLM запрос успешен после ${attempt + 1} попытки(ок). Время этой попытки: ${attemptDuration}ms, общее время: ${totalDuration}ms`,
+            );
+          } else {
+            this.logger.info(
+              `✅ [${payload.triggered_pair}] LLM запрос успешен с первой попытки. Время выполнения: ${attemptDuration}ms`,
+            );
+          }
+
+          return response.data; // Вернется полный ответ, `ask` его распарсит
+        } catch (error) {
+          if (!isAxiosError(error)) {
+            throw error;
+          }
+
+          const axiosError = error as AxiosError;
 
           // 6. (Критично) Обработка ошибок Axios
           if (axiosError.response) {
@@ -259,11 +362,13 @@
               throw new LLMRequestError(`LLM Bad Request (Status 400)`, axiosError);
             }
 
-          } else if (axios.isAxiosError(error) && error.code === 'ECONNABORTED' || error.request) {
+          } else if (axiosError.code === 'ECONNABORTED' || axiosError.request) {
             // (D) Ошибка сети или Таймаут
-            this.logger.warn(`LLM Network Error or Timeout (Code: ${axiosError.code}). Retrying (attempt ${attempt + 1}/${MAX_RETRIES})...`);
-            const delay = (2 ** attempt) * INITIAL_BACKOFF_MS + (Math.random() * 1000);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            const delay = 2 ** attempt * INITIAL_BACKOFF_MS + Math.random() * 1000;
+            this.logger.warn(
+              `LLM Network Error or Timeout (Code: ${axiosError.code}). Retrying (attempt ${attempt + 1}/${MAX_RETRIES})...`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, delay));
             continue;
           }
 
@@ -274,7 +379,10 @@
       }
 
       // 7. (Критично) Если вышли из цикла
-      this.logger.error(`LLM request failed after ${MAX_RETRIES} attempts.`);
+      const totalDuration = Date.now() - requestStartTime;
+      this.logger.error(
+        `❌ [${payload.triggered_pair}] LLM запрос провалился после ${MAX_RETRIES} попыток. Общее время: ${totalDuration}ms`,
+      );
       throw new LLMNetworkError(`LLM request failed after ${MAX_RETRIES} attempts.`);
 
     } }

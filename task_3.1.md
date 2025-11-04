@@ -41,29 +41,56 @@
 ### 4.3. Создание Файла 3: `src/services/ProductionExchangeService.ts`
 
 1.  **Конструктор и Инициализация:**
-    - **Логика:** Конструктор _обязан_ инициализировать `ccxt.binance()` (с `defaultType: 'spot'`).
+    - **Логика:** Конструктор _обязан_ инициализировать `ccxt.binance()` с параметрами:
+      - `apiKey` и `secret` из `ConfigService.getBinanceConfig()`
+      - `enableRateLimit: true` (включение автоматического rate limiting)
+      - `enableTimeSync: true` (включение автоматической синхронизации времени)
+      - `timeout: 30000` (30 секунд таймаут HTTP запросов)
+      - `options.defaultType: 'spot'` (спотовая торговля)
+      - `options.recvWindow: 10000` (10 секунд окно времени для надежности)
     - **Нюанс реализации:** Если `APP_MODE` (из `ConfigService`) равен `'testnet'`, конструктор _обязан_ вызвать `this.ccxtExchange.setSandboxMode(true)` и залогировать `warn`.
+    - **Синхронизация времени:** Для testnet режима добавлен механизм синхронизации времени через `_syncTimeOnce()`, который вызывается при первом запросе в методе `execute()`.
 
-2.  **A. Метод-обертка `private async execute<T>(fn: () => Promise<T>)` (Критично):**
+2.  **A. Метод-обертка `private async execute<T>(fn: () => Promise<T>, maxRetries: number = 5)` (Критично):**
     - **Логика:** Этот метод _обязан_ быть вызван _каждым_ публичным REST-методом.
-    - **Нюанс реализации:** Внутри `catch` блока _обязан_ быть `switch` или `if/else if` для **трансляции ошибок**:
-      - `if (e instanceof ccxt.RateLimitExceeded)` -> `throw new ExchangeRateLimitError(...)`
-      - `if (e instanceof ccxt.InsufficientFunds)` -> `throw new InsufficientFundsError(...)` (Критично для `Worker`!)
-      - `if (e instanceof ccxt.NetworkError)` -> `throw new ExchangeNetworkError(...)`
-      - Остальные ошибки `ccxt` _обязаны_ быть преобразованы в `ExchangeApiError` или базовый `ExchangeError`.
+    - **Нюанс реализации:**
+      - **Синхронизация времени:** Для testnet режима вызвать `_syncTimeOnce()` при первом запросе, если `timeSyncDone === false`.
+      - **Механизм Retry:** Реализовать цикл повторов (до `maxRetries` попыток) с экспоненциальной задержкой:
+        - Для сетевых ошибок (`NetworkError`, timeout) повторить запрос с задержкой `retryDelayMs * (attempt + 1)` (начинается с 2 секунд).
+        - Для ошибок timestamp (-1021) в testnet режиме пересинхронизировать время и повторить без задержки.
+        - Логировать каждую попытку и успех после retry.
+      - **Трансляция ошибок:** Внутри `catch` блока _обязан_ быть `if/else if` для **трансляции ошибок**:
+        - `if (e instanceof ccxt.RateLimitExceeded)` -> `throw new ExchangeRateLimitError(...)`
+        - `if (e instanceof ccxt.InsufficientFunds)` -> `throw new InsufficientFundsError(...)` (Критично для `Worker`!)
+        - `if (e instanceof ccxt.NetworkError)` -> `throw new ExchangeNetworkError(...)`
+        - `if (e instanceof ccxt.OrderNotFound)` -> `throw new OrderNotFoundError(...)`
+        - `if (e instanceof ccxt.BaseError)` -> `throw new ExchangeApiError(...)`
+        - Остальные ошибки _обязаны_ быть преобразованы в базовый `ExchangeError`.
+      - После исчерпания всех попыток пробросить финальную ошибку.
 
 3.  **B. REST Методы (`fetchOHLCV`, `fetchTicker`):**
     - **Логика:** Эти методы _обязаны_ использовать `execute()` и _обязаны_ выполнять конвертацию в `Decimal`.
     - **Нюанс реализации:** Например, `fetchOHLCV` _обязан_ в цикле `map` брать сырые значения `ohlcv[1]`...`ohlcv[5]` и возвращать `new Decimal(ohlcv[n])` для каждого поля.
 
 4.  **C. Метод `public async watchTickers(...)` (WebSocket):**
-    - **Логика:** Этот метод _обязан_ запустить бесконечный цикл `while (!GlobalStateService.getIsShuttingDown())` вокруг `this.ccxtExchange.watchTickers()`.
-    - **Нюанс реализации (Ошибка):** `catch` блок _внутри_ цикла `watch` _обязан_ использовать ту же логику трансляции ошибок (как в `execute`), залогировать `error` и добавить **паузу** (e.g., 5 секунд) _перед_ следующей итерацией цикла.
-    - **Нюанс реализации (Decimal):** Полученный `ticker` _обязан_ быть преобразован в `IDecimalTicker` (e.g., `last: new Decimal(ticker.last)`) _перед_ вызовом `callback(decimalTicker)`.
+    - **Логика:** Этот метод _обязан_ реализовать WebSocket подключение напрямую (не через `ccxt.watchTickers()`), используя библиотеку `ws`.
+    - **Нюанс реализации:**
+      - **Построение URL:** Использовать метод `_buildWebSocketUrl(symbols)` для построения WebSocket URL (разные для testnet и production).
+      - **Основной цикл:** Запустить бесконечный цикл `while (!GlobalStateService.getInstance().getIsShuttingDown())`.
+      - **Ограничение попыток:** Отслеживать количество попыток переподключения (`wsReconnectAttempts`) с максимумом `maxReconnectAttempts` (например, 10). При достижении максимума пробросить ошибку.
+      - **Подключение:** Создать WebSocket соединение с таймаутом подключения (например, 10 секунд). Обработать события `open`, `error`, `unexpected-response`.
+      - **Обработка сообщений:** В обработчике `message` парсить JSON, преобразовывать в `IDecimalTicker` через `_parseBinanceTicker()`, вызывать `callback()` асинхронно (не блокируя обработку).
+      - **Переподключение:** При неожиданном закрытии соединения (код не 1000) использовать экспоненциальную задержку `reconnectDelay(attempt)` (от 1 секунды до максимума 30 секунд) перед следующей попыткой.
+      - **Graceful Shutdown:** При `getIsShuttingDown() === true` закрыть соединение с кодом 1000 и завершить цикл.
+    - **Нюанс реализации (Парсинг):** Метод `_parseBinanceTicker()` должен обрабатывать различные форматы сообщений Binance WebSocket и преобразовывать данные в `IDecimalTicker` с использованием `toDecimal()` для всех финансовых полей.
+    - **Нюанс реализации (Ошибки):** Все ошибки парсинга и обработки должны логироваться, но не прерывать цикл. Ошибки переподключения логируются и обрабатываются с паузой перед следующей попыткой.
 
 5.  **D. Метод `public async close()` (Graceful Shutdown):**
     - **Логика:** Этот метод _обязан_ корректно закрыть все активные соединения.
-    - **Нюанс реализации:** Он _обязан_ вызвать `await this.ccxtExchange.close()`.
+    - **Нюанс реализации:**
+      - Если WebSocket соединение открыто (`this.wsConnection`), закрыть его с кодом 1000 ('Normal closure') и обнулить ссылку.
+      - Вызвать `await this.ccxtExchange.close()` для закрытия всех соединений CCXT.
+      - Залогировать `info` о закрытии соединений.
 
 ## 5\. Критерии Приемки (Acceptance Criteria)
 
@@ -97,4 +124,16 @@
 
 8.  Shutdown
 
-    Метод `close()` реализован и вызывает `this.ccxtExchange.close()`.
+    Метод `close()` реализован и закрывает WebSocket соединение (если открыто) и вызывает `this.ccxtExchange.close()`.
+
+9.  Retry
+
+    Метод `execute()` реализует механизм повторов (до 5 попыток) для сетевых ошибок и ошибок timeout с экспоненциальной задержкой.
+
+10. TimeSync
+
+    Для testnet режима реализована синхронизация времени через `_syncTimeOnce()` при первом запросе и при ошибках timestamp (-1021).
+
+11. WebSocket
+
+    Метод `watchTickers()` реализован через прямое WebSocket подключение с автоматическим переподключением, экспоненциальной задержкой и ограничением попыток.

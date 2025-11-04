@@ -694,132 +694,296 @@
         }
 
         // (ИЗМЕНЕНО в 7.4) - Реализация `MODIFY_POSITION`
-        private async handleModifyPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async handleModifyPosition(
+            decision: LLMDecision,
+            _validationResult: CalculatedAmounts
+        ): Promise<void> {
             const { pair, parameters } = decision;
             const { new_stop_loss_price, new_take_profit_price, new_trailing_stop_config } = parameters;
 
             this.logger.debug(`[${pair}] Запуск handleModifyPosition...`);
 
-            // (Критично) Вся операция выполняется в ОДНОЙ транзакции
-            return this.dbService.executeInTransaction(async (client: TransactionClient): Promise<Order | null> => {
+            // КРИТИЧНО: Отмена и создание ордеров на бирже должны происходить ДО транзакции БД
+            // Если БД операция упадет, нужно отменить созданные ордера
 
-                // --- Шаг 1: Получить Позицию и ее Ордера из БД (и заблокировать) ---
-                // (Этот SQL-запрос извлекает все необходимое для принятия решения)
-                const queryResult = await client.query(
-                    `SELECT
-                        p.side, p.amount,
-                        (SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1 AND type = 'stop_loss' LIMIT 1) as current_sl_id,
-                        (SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1 AND type = 'take_profit' LIMIT 1) as current_tp_id,
-                        (SELECT current_sl_order_id FROM TSL_State WHERE pair = $1 LIMIT 1) as current_tsl_sl_id
-                     FROM ActivePositions p
-                     WHERE p.pair = $1
-                     FOR UPDATE OF p`, // (Блокируем строку ActivePositions)
-                    [pair]
+            // --- Шаг 1: Получить информацию о позиции (БЕЗ блокировки, для чтения) ---
+            const positionCheckResult = await this.databaseService.query(
+                `SELECT
+                    p.side, p.amount,
+                    (SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1 AND type = 'stop_loss_limit' LIMIT 1) as current_sl_id,
+                    (SELECT exchange_order_id FROM ActiveOrders WHERE pair = $1 AND type = 'take_profit_limit' LIMIT 1) as current_tp_id,
+                    (SELECT current_stop_order_id FROM TSL_State WHERE pair = $1 LIMIT 1) as current_tsl_sl_id
+                FROM ActivePositions p
+                WHERE p.pair = $1`,
+                [pair]
+            );
+
+            if (!positionCheckResult.rowCount || positionCheckResult.rowCount === 0) {
+                this.logger.warn(`[${pair}] Попытка MODIFY_POSITION для несуществующей позиции.`);
+                throw new Error(`[${pair}] (ОШИБКА СИНХРОНИЗАЦИИ) Позиция для MODIFY не найдена в ActivePositions.`);
+            }
+
+            const pos = positionCheckResult.rows[0];
+            const oppositeSide: 'buy' | 'sell' = pos.side === 'long' ? 'sell' : 'buy';
+            const positionAmountDecimal = new DecimalConstructor(pos.amount.toString());
+            let newSlOrder: IDecimalOrder | null = null;
+            let newTpOrder: IDecimalOrder | null = null;
+            const ordersToCancel: string[] = [];
+
+            // Объявляем oldSlId вне блока if для использования в catch
+            const oldSlId = pos.current_tsl_sl_id || pos.current_sl_id;
+            let oldSlPriceForRollback: DecimalValue | null = null;
+            let oldSlAmountForRollback: DecimalValue | null = null;
+
+            // --- Шаг 2: Обработка нового Stop Loss (если запрошен) ДО транзакции БД ---
+            if (new_stop_loss_price !== null && new_stop_loss_price !== undefined) {
+                this.logger.debug(`[${pair}] Модификация SL. Новая цена: ${new_stop_loss_price}`);
+
+                // 2.1. Отмена старого SL на бирже (сохраняем данные для возможного rollback)
+                if (oldSlId) {
+                    try {
+                        // ВАЖНО: Получаем данные старого SL из БД ПЕРЕД отменой (для rollback)
+                        const oldSlOrderResult = await this.databaseService.query(
+                            `SELECT price, amount FROM ActiveOrders WHERE exchange_order_id = $1`,
+                            [oldSlId]
+                        );
+
+                        if (oldSlOrderResult.rowCount && oldSlOrderResult.rowCount > 0) {
+                            const oldSlData = oldSlOrderResult.rows[0];
+                            oldSlPriceForRollback = new DecimalConstructor(oldSlData.price.toString());
+                            oldSlAmountForRollback = new DecimalConstructor(oldSlData.amount.toString());
+                            this.logger.debug(
+                                `[${pair}] Сохранены параметры старого SL для rollback: price=${oldSlPriceForRollback.toString()}, amount=${oldSlAmountForRollback.toString()}`,
+                            );
+                        }
+
+                        await this.executionService.cancelOrderWithRetry(oldSlId, pair);
+                        ordersToCancel.push(oldSlId);
+                        this.logger.debug(`[${pair}] Старый SL ордер ${oldSlId} отменен на бирже.`);
+                    } catch (cancelError) {
+                        this.logger.warn(`[${pair}] Не удалось отменить старый SL ордер ${oldSlId}:`, cancelError);
+                        // Продолжаем работу, возможно ордер уже исполнен или отменен
+                    }
+                }
+
+                // 2.2. Создание нового SL на бирже
+                const slPriceDecimal = new DecimalConstructor(new_stop_loss_price.toString());
+                const slPriceParams = { stopPrice: slPriceDecimal.toNumber() };
+
+                try {
+                    newSlOrder = await this.executionService.createOrderWithRetry(
+                        pair,
+                        'stop_loss_limit',
+                        oppositeSide,
+                        positionAmountDecimal,
+                        slPriceDecimal,
+                        slPriceParams,
+                    );
+                    this.logger.debug(`[${pair}] Новый SL ордер ${newSlOrder.id} создан на бирже.`);
+                } catch (createError) {
+                    // КРИТИЧЕСКИЙ СБОЙ: новый SL не создан, но старый уже отменен
+                    // Попытка восстановить старый SL (rollback)
+                    this.logger.error(
+                        `[${pair}] Не удалось создать новый SL ордер. Попытка восстановить старый SL...`,
+                        createError,
+                    );
+
+                    if (oldSlId && oldSlPriceForRollback && oldSlAmountForRollback) {
+                        try {
+                            const oldSlPriceParams = { stopPrice: oldSlPriceForRollback.toNumber() };
+
+                            // Пытаемся восстановить старый SL (может не сработать, если ордер уже исполнен на бирже)
+                            await this.executionService
+                                .createOrderWithRetry(
+                                    pair,
+                                    'stop_loss_limit',
+                                    oppositeSide,
+                                    oldSlAmountForRollback,
+                                    oldSlPriceForRollback,
+                                    oldSlPriceParams,
+                                )
+                                .then(() => {
+                                    this.logger.warn(
+                                        `[${pair}] Старый SL ордер восстановлен. Позиция снова под защитой. Но MODIFY_POSITION провалился.`,
+                                    );
+                                })
+                                .catch((rollbackError) => {
+                                    this.logger.error(
+                                        `[${pair}] Не удалось восстановить старый SL ордер (возможно, он уже исполнен):`,
+                                        rollbackError,
+                                    );
+                                    this.logger.error(`[${pair}] КРИТИЧЕСКАЯ СИТУАЦИЯ: Позиция может остаться без защиты!`);
+                                });
+                        } catch (rollbackError) {
+                            this.logger.error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА при попытке rollback старого SL:`, rollbackError);
+                        }
+                    } else {
+                        this.logger.error(`[${pair}] Невозможно выполнить rollback: данные старого SL не были сохранены.`);
+                    }
+
+                    throw createError;
+                }
+            }
+
+            // --- Шаг 3: Обработка нового Take Profit (если запрошен) ДО транзакции БД ---
+            if (new_take_profit_price !== null && new_take_profit_price !== undefined) {
+                this.logger.debug(`[${pair}] Модификация TP. Новая цена: ${new_take_profit_price}`);
+
+                // 3.1. Отмена старого TP на бирже
+                if (pos.current_tp_id) {
+                    try {
+                        await this.executionService.cancelOrderWithRetry(pos.current_tp_id, pair);
+                        ordersToCancel.push(pos.current_tp_id);
+                        this.logger.debug(`[${pair}] Старый TP ордер ${pos.current_tp_id} отменен на бирже.`);
+                    } catch (cancelError) {
+                        this.logger.warn(`[${pair}] Не удалось отменить старый TP ордер ${pos.current_tp_id}:`, cancelError);
+                    }
+                }
+
+                // 3.2. Создание нового TP на бирже
+                const tpPriceDecimal = new DecimalConstructor(new_take_profit_price.toString());
+
+                try {
+                    newTpOrder = await this.executionService.createOrderWithRetry(
+                        pair,
+                        'limit',
+                        oppositeSide,
+                        positionAmountDecimal,
+                        tpPriceDecimal,
+                    );
+                    this.logger.debug(`[${pair}] Новый TP ордер ${newTpOrder.id} создан на бирже.`);
+                } catch (createError) {
+                    this.logger.error(`[${pair}] Не удалось создать новый TP ордер:`, createError);
+                    // Если SL был создан, отменяем его
+                    if (newSlOrder) {
+                        try {
+                            await this.executionService.cancelOrderWithRetry(newSlOrder.id, pair);
+                        } catch (cancelError) {
+                            this.logger.error(`[${pair}] Не удалось отменить только что созданный SL ордер:`, cancelError);
+                        }
+                    }
+                    throw createError;
+                }
+            }
+
+            // --- Шаг 4: Атомарное обновление БД ---
+            try {
+                await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
+                    // Блокируем позицию для обновления
+                    const queryResult = await client.query(`SELECT side, amount FROM ActivePositions WHERE pair = $1 FOR UPDATE`, [
+                        pair,
+                    ]);
+
+                    if (!queryResult.rowCount || queryResult.rowCount === 0) {
+                        throw new Error(`[${pair}] Позиция исчезла из БД во время MODIFY.`);
+                    }
+
+                    // 4.1. Удаляем старые ордера из БД
+                    for (const orderId of ordersToCancel) {
+                        await client.query(`DELETE FROM ActiveOrders WHERE exchange_order_id = $1`, [orderId]);
+                        await client.query(`DELETE FROM TSL_State WHERE current_stop_order_id = $1`, [orderId]);
+                    }
+
+                    // 4.2. Сохранение нового SL в БД
+                    if (newSlOrder) {
+                        const slOrderAny = newSlOrder as any;
+                        const slPrice = slOrderAny.price || slOrderAny.stopPrice || new_stop_loss_price;
+                        const slPriceDecimalForDb = new DecimalConstructor(slPrice.toString());
+
+                        await client.query(
+                            `INSERT INTO ActiveOrders (exchange_order_id, pair, status, type, side, price, amount)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                            [
+                                newSlOrder.id,
+                                pair,
+                                newSlOrder.status || 'open',
+                                'stop_loss_limit',
+                                newSlOrder.side,
+                                slPriceDecimalForDb.toNumber(),
+                                positionAmountDecimal.toNumber(),
+                            ],
+                        );
+
+                        // Обновляем цену в ActivePositions
+                        await client.query(`UPDATE ActivePositions SET stop_loss_price = $1 WHERE pair = $2`, [
+                            slPriceDecimalForDb.toNumber(),
+                            pair,
+                        ]);
+
+                        // 4.3. Логика сохранения/обновления TSL (если запрошен)
+                        if (new_trailing_stop_config) {
+                            this.logger.debug(`[${pair}] (Re)Configuring TSL...`);
+                            const tslConfigJson = JSON.stringify(new_trailing_stop_config);
+
+                            await client.query(
+                                `INSERT INTO TSL_State (pair, current_stop_price, current_stop_order_id, price_seen, rule_config_json)
+                                 VALUES ($1, $2, $3, $4, $5)
+                                 ON CONFLICT (pair) DO UPDATE SET
+                                   current_stop_price = excluded.current_stop_price,
+                                   current_stop_order_id = excluded.current_stop_order_id,
+                                   price_seen = excluded.price_seen,
+                                   rule_config_json = excluded.rule_config_json,
+                                   updated_at = NOW()`,
+                                [pair, slPriceDecimalForDb.toNumber(), newSlOrder.id, slPriceDecimalForDb.toNumber(), tslConfigJson],
+                            );
+                        } else if (ordersToCancel.length > 0) {
+                            // Если TSL был отключен, удаляем его состояние
+                            await client.query(`DELETE FROM TSL_State WHERE pair = $1`, [pair]);
+                        }
+                    }
+
+                    // 4.4. Сохранение нового TP в БД
+                    if (newTpOrder) {
+                        const tpOrderAny = newTpOrder as any;
+                        const tpPrice = tpOrderAny.price || new_take_profit_price;
+                        const tpPriceDecimalForDb = new DecimalConstructor(tpPrice.toString());
+
+                        await client.query(
+                            `INSERT INTO ActiveOrders (exchange_order_id, pair, status, type, side, price, amount)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                            [
+                                newTpOrder.id,
+                                pair,
+                                newTpOrder.status || 'open',
+                                'take_profit_limit',
+                                newTpOrder.side,
+                                tpPriceDecimalForDb.toNumber(),
+                                positionAmountDecimal.toNumber(),
+                            ],
+                        );
+                    }
+
+                    this.logger.info(`[${pair}] Атомарная транзакция (MODIFY_POSITION) УСПЕШНА.`);
+                });
+            } catch (dbError) {
+                // КРИТИЧЕСКИЙ СБОЙ: БД операция упала, но новые ордера уже созданы на бирже
+                // Отменяем их, чтобы избежать "зомби" ордеров
+                this.logger.error(`[${pair}] КРИТИЧЕСКИЙ СБОЙ: БД транзакция провалилась. Отменяем новые ордера...`, dbError);
+
+                const cancelPromises: Promise<void>[] = [];
+                if (newSlOrder) {
+                    cancelPromises.push(
+                        this.executionService.cancelOrderWithRetry(newSlOrder.id, pair).catch((cancelError) => {
+                            this.logger.error(`[${pair}] Не удалось отменить новый SL ордер ${newSlOrder.id}:`, cancelError);
+                        }),
+                    );
+                }
+                if (newTpOrder) {
+                    cancelPromises.push(
+                        this.executionService.cancelOrderWithRetry(newTpOrder.id, pair).catch((cancelError) => {
+                            this.logger.error(`[${pair}] Не удалось отменить новый TP ордер ${newTpOrder.id}:`, cancelError);
+                        }),
+                    );
+                }
+
+                await Promise.allSettled(cancelPromises);
+                this.logger.warn(
+                    `[${pair}] Новые ордера отменены. Старые ордера уже отменены, позиция в несогласованном состоянии. SyncEngine восстановит состояние при следующей сверке.`,
                 );
 
-                if (queryResult.rowCount === 0) {
-                    this.logger.warn(`[${pair}] Попытка MODIFY_POSITION для несуществующей позиции.`);
-                    throw new Error(`[${pair}] (ОШИБКА СИНХРОНИЗАЦИИ) Позиция для MODIFY не найдена в ActivePositions.`);
-                }
-
-                const pos = queryResult.rows[0];
-                const oppositeSide: OrderSide = (pos.side === 'long') ? 'sell' : 'buy';
-                const positionAmount = new Decimal(pos.amount);
-                let newMainOrder: Order | null = null; // (Возвращаем новый SL ордер)
-
-                // --- Шаг 2: Обработка нового Stop Loss (если запрошен) ---
-                if (new_stop_loss_price) {
-                    this.logger.debug(`[${pair}] Модификация SL. Новая цена: ${new_stop_loss_price}`);
-
-                    // 2.1. Логика отмены старого SL
-                    // (ID старого SL может быть в TSL_State или в ActiveOrders)
-                    const oldSlId = pos.current_tsl_sl_id || pos.current_sl_id;
-                    if (oldSlId) {
-                        // (Используем Guaranteed service для отмены на бирже)
-                        await this.executionService.cancelOrderWithRetry(oldSlId, pair);
-                        // (Атомарно удаляем из наших таблиц)
-                        await client.query(`DELETE FROM ActiveOrders WHERE exchange_order_id = $1`, [oldSlId]);
-                        await client.query(`DELETE FROM TSL_State WHERE current_sl_order_id = $1`, [oldSlId]);
-                    } else {
-                        this.logger.warn(`[${pair}] MODIFY_POSITION: не найден старый SL ордер для отмены.`);
-                    }
-
-                    // 2.2. Логика создания нового SL
-                    // (Используем Guaranteed service для создания на бирже)
-                    // (Параметры stopPrice упрощены для V1, см. Задачу 7.2)
-                    const slPriceParams = { 'stopPrice': new_stop_loss_price.toNumber() };
-                    newMainOrder = await this.executionService.createOrderWithRetry(
-                        pair, 'stop_loss_limit', oppositeSide, positionAmount, new_stop_loss_price, slPriceParams
-                    );
-
-                    // 2.3. Логика сохранения нового SL в БД
-                    // (Атомарно записываем в ActiveOrders)
-                    await client.query(
-                        `INSERT INTO ActiveOrders (exchange_order_id, pair, status, type, side, price, amount)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                        [newMainOrder.id, pair, newMainOrder.status, 'stop_loss', newMainOrder.side, newMainOrder.price, newMainOrder.amount]
-                    );
-
-                    // (Атомарно обновляем цену в ActivePositions)
-                    await client.query(
-                        `UPDATE ActivePositions SET current_stop_loss_price = $1 WHERE pair = $2`,
-                        [new_stop_loss_price.toNumber(), pair]
-                    );
-
-                    // 2.4. Логика сохранения/обновления TSL (если запрошен)
-                    if (new_trailing_stop_config) {
-                        this.logger.debug(`[${pair}] (Re)Configuring TSL...`);
-                        // (Логика: Атомарно UPSERT TSL_State)
-                        // (INSERT INTO TSL_State (...) VALUES (...) ON CONFLICT (pair) DO UPDATE SET ...)
-                        // (Важно: `current_sl_order_id` должен быть `newMainOrder.id`)
-
-                        // (Задача 7.4 - Нюанс реализации):
-                        // Разработчик должен реализовать UPSERT для TSL_State,
-                        // привязывая `newMainOrder.id` к `current_sl_order_id`.
-                        // Также необходимо обновить `tsl_config_json`.
-                    }
-                }
-
-                // --- Шаг 3: Обработка нового Take Profit (если запрошен) ---
-                if (new_take_profit_price) {
-                    this.logger.debug(`[${pair}] Модификация TP. Новая цена: ${new_take_profit_price}`);
-
-                    // 3.1. Логика отмены старого TP
-                    if (pos.current_tp_id) {
-                        // (Используем Guaranteed service для отмены на бирже)
-                        await this.executionService.cancelOrderWithRetry(pos.current_tp_id, pair);
-                        // (Атомарно удаляем из ActiveOrders)
-                        await client.query(`DELETE FROM ActiveOrders WHERE exchange_order_id = $1`, [pos.current_tp_id]);
-                    } else {
-                        this.logger.warn(`[${pair}] MODIFY_POSITION: не найден старый TP ордер для отмены.`);
-                    }
-
-                    // 3.2. Логика создания нового TP
-                    // (Используем Guaranteed service для создания на бирже)
-                    const newTpOrder = await this.executionService.createOrderWithRetry(
-                        pair, 'limit', oppositeSide, positionAmount, new_take_profit_price
-                    );
-
-                    // 3.3. Логика сохранения нового TP в БД
-                    // (Атомарно записываем в ActiveOrders)
-                    await client.query(
-                        `INSERT INTO ActiveOrders (exchange_order_id, pair, status, type, side, price, amount)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                        [newTpOrder.id, pair, newTpOrder.status, 'take_profit', newTpOrder.side, newTpOrder.price, newTpOrder.amount]
-                    );
-
-                    // (Атомарно обновляем цену в ActivePositions)
-                    await client.query(
-                        `UPDATE ActivePositions SET current_take_profit_price = $1 WHERE pair = $2`,
-                        [new_take_profit_price.toNumber(), pair]
-                    );
-                }
-
-                this.logger.info(`[${pair}] Атомарная транзакция (MODIFY Position) УСПЕШНА.`);
-
-                // (Возвращаем новый SL ордер, если он был создан, для TSLHandler)
-                return newMainOrder;
-            });
+                // Пробрасываем ошибку выше
+                throw dbError;
+            }
         }
 
         // (ИЗМЕНЕНО в 7.4) - Заглушка для Задачи 7.5
@@ -905,22 +1069,26 @@
 
 37. **\[7.3.1 Step 4: DB\]** `_handleCloseLimitPosition` **НЕ** удаляет из `ActivePositions` или `TSL_State`.
 
-38. **(НОВОЕ - 7.4) \[Transaction (Критично)\]** `handleModifyPosition` _полностью_ обернут в `this.dbService.executeInTransaction()`.
+38. **(НОВОЕ - 7.4) \[Architecture (Критично)\]** Отмена и создание ордеров на бирже происходят **ДО** транзакции БД. Если БД операция упадет, созданные ордера отменяются.
 
-39. **(НОВОЕ - 7.4) \[Step 1: Get Position\]** _Внутри_ транзакции `handleModifyPosition` _сначала_ делает `SELECT ... FOR UPDATE` из `ActivePositions` (с `JOIN` или `sub-select`) для получения `side`, `amount` и ID существующих `stop_loss`, `take_profit` и `TSL` ордеров.
+39. **(НОВОЕ - 7.4) \[Step 1: Get Position (Read-Only)\]** `handleModifyPosition` _сначала_ делает `SELECT` (БЕЗ `FOR UPDATE`) из `ActivePositions` с sub-select для получения `side`, `amount` и ID существующих `stop_loss_limit`, `take_profit_limit` и `TSL` ордеров (используется `current_stop_order_id` вместо `current_sl_order_id`).
 
-40. **(НОВОЕ - 7.4) \[Step 1: Robustness\]** Добавлена проверка `rowCount === 0` (ошибка синхронизации) после `SELECT`.
+40. **(НОВОЕ - 7.4) \[Step 1: Robustness\]** Добавлена проверка `!positionCheckResult.rowCount || positionCheckResult.rowCount === 0` (ошибка синхронизации) после `SELECT`.
 
-41. **(НОВОЕ - 7.4) \[Step 2: Logic (SL)\]** Если `new_stop_loss_price` предоставлен, реализована логика "Cancel-Then-Create" (Отменить-Затем-Создать).
+41. **(НОВОЕ - 7.4) \[Step 2: Cancel (SL) - Before DB\]** Если `new_stop_loss_price` предоставлен, логика отмены старого SL происходит **ДО** транзакции БД: получает данные старого SL из БД для rollback, вызывает `executionService.cancelOrderWithRetry()` на бирже, сохраняет ID в `ordersToCancel`.
 
-42. **(НОВОЕ - 7.4) \[Step 2: Cancel (SL)\]** Логика отмены (Cancel) _корректно_ использует `executionService.cancelOrderWithRetry()` и `DELETE` из `ActiveOrders` и `TSL_State`.
+42. **(НОВОЕ - 7.4) \[Step 2: Create (SL) - Before DB\]** Логика создания нового SL происходит **ДО** транзакции БД: вызывает `executionService.createOrderWithRetry()` для `stop_loss_limit`, сохраняет результат в `newSlOrder`.
 
-43. **(НОВОЕ - 7.4) \[Step 2: Create (SL)\]** Логика создания (Create) _корректно_ использует `executionService.createOrderWithRetry()`, `INSERT` в `ActiveOrders` (type: 'stop_loss') и `UPDATE` `ActivePositions.current_stop_loss_price`.
+43. **(НОВОЕ - 7.4) \[Step 2: Rollback (SL)\]** Если создание нового SL провалилось, реализована логика rollback: попытка восстановить старый SL через `executionService.createOrderWithRetry()` с сохраненными параметрами (`oldSlPriceForRollback`, `oldSlAmountForRollback`).
 
-44. **(НОВОЕ - 7.4) \[Step 2: TSL\]** Если `new_trailing_stop_config` предоставлен, реализована логика `UPSERT` для `TSL_State`, привязанная к ID _нового_ SL-ордера.
+44. **(НОВОЕ - 7.4) \[Step 3: Cancel/Create (TP) - Before DB\]** Если `new_take_profit_price` предоставлен, логика отмены/создания TP происходит **ДО** транзакции БД. При ошибке создания TP отменяется созданный SL (если был).
 
-45. **(НОВОЕ - 7.4) \[Step 3: Logic (TP)\]** Если `new_take_profit_price` предоставлен, реализована логика "Cancel-Then-Create" (аналогично SL).
+45. **(НОВОЕ - 7.4) \[Step 4: DB Transaction\]** Транзакция БД обернута в `try/catch`: блокирует позицию через `SELECT ... FOR UPDATE`, удаляет старые ордера из БД (`DELETE FROM ActiveOrders`, `DELETE FROM TSL_State WHERE current_stop_order_id`), сохраняет новые ордера (`INSERT INTO ActiveOrders`), обновляет `ActivePositions.stop_loss_price`, выполняет UPSERT для `TSL_State` с `current_stop_order_id`, `rule_config_json` и `ON CONFLICT DO UPDATE`.
 
-46. **(НОВОЕ - 7.4) \[Step 3: DB (TP)\]** Логика (Cancel-Then-Create) _корректно_ отменяет старый TP, создает новый и обновляет `ActiveOrders` и `ActivePositions.current_take_profit_price`.
+46. **(НОВОЕ - 7.4) \[Step 4: DB Error Handling\]** При ошибке БД транзакции (`catch (dbError)`): отменяет созданные на бирже ордера (`newSlOrder`, `newTpOrder`) через `executionService.cancelOrderWithRetry()` в `Promise.allSettled`, логирует предупреждение о несогласованном состоянии.
 
-47. **(НОВОЕ - 7.4) \[Stub 7.5\]** `handleCancelOrders` остается заглушкой (STUB).
+47. **(НОВОЕ - 7.4) \[Return Type\]** `handleModifyPosition` возвращает `Promise<void>` вместо `Promise<Order | null>`.
+
+48. **(НОВОЕ - 7.4) \[TSL Config\]** Если `new_trailing_stop_config` не предоставлен, но старые ордера были отменены (`ordersToCancel.length > 0`), TSL состояние удаляется (`DELETE FROM TSL_State WHERE pair`).
+
+49. **(НОВОЕ - 7.4) \[Stub 7.5\]** `handleCancelOrders` остается заглушкой (STUB).

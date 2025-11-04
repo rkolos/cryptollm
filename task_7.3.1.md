@@ -624,72 +624,87 @@
         }
 
         // (ИЗМЕНЕНО в 7.3.1) - Реализация `CLOSE (Limit)`
-        private async _handleCloseLimitPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async _handleCloseLimitPosition(
+            decision: LLMDecision,
+            _validationResult: CalculatedAmounts
+        ): Promise<void> {
             const { pair, parameters } = decision;
             const { price: limitPrice } = parameters;
 
+            // Проверка наличия цены для limit ордера
             if (!limitPrice) {
-                throw new Error(`[${pair}] (ОШИБКА ВАЛИДАТОРА) CLOSE_POSITION (Limit) требует 'price'.`);
+                throw new Error(`[${pair}] (ОШИБКА ВАЛИДАТОРА) CLOSE_POSITION (Limit) требует параметр 'price'.`);
             }
 
             this.logger.debug(`[${pair}] Запуск _handleCloseLimitPosition. Price: ${limitPrice}`);
 
-            // (Критично) Вся операция выполняется в ОДНОЙ транзакции
-            return this.dbService.executeInTransaction(async (client: TransactionClient): Promise<Order> => {
-
+            // Критично: Вся операция выполняется в ОДНОЙ транзакции
+            await this.databaseService.executeInTransaction(async (client: PoolClient): Promise<void> => {
                 // --- Шаг 1: Получить Позицию из БД (и заблокировать строку) ---
-                const positionResult = await client.query(
-                    `SELECT amount, side FROM ActivePositions WHERE pair = $1 FOR UPDATE`,
-                    [pair]
-                );
+                const positionResult = await client.query(`SELECT amount, side FROM ActivePositions WHERE pair = $1 FOR UPDATE`, [
+                    pair,
+                ]);
 
-                if (positionResult.rowCount === 0) {
+                if (!positionResult.rowCount || positionResult.rowCount === 0) {
                     this.logger.warn(`[${pair}] Попытка установить Limit Close для позиции, которая не существует в БД.`);
                     throw new Error(`[${pair}] (ОШИБКА СИНХРОНИЗАЦИИ) Позиция для Limit Close не найдена в ActivePositions.`);
                 }
 
                 const currentPosition = positionResult.rows[0];
-                const positionAmount = new Decimal(currentPosition.amount);
-                const positionSide = currentPosition.side; // 'long' или 'short'
+                const positionAmountDecimal = new DecimalConstructor(currentPosition.amount.toString());
+                const positionSide = currentPosition.side as 'long' | 'short';
 
-                // (Определяем ордер на закрытие)
-                const closeSide: OrderSide = (positionSide === 'long') ? 'sell' : 'buy';
+                // Определяем ордер на закрытие
+                const closeSide: 'buy' | 'sell' = positionSide === 'long' ? 'sell' : 'buy';
 
-                this.logger.debug(`[${pair}] Установка Limit Close (TP) для ${positionSide} позиции. Объем: ${positionAmount}, Сторона: ${closeSide}.`);
+                this.logger.debug(
+                    `[${pair}] Установка Limit Close (TP) для ${positionSide} позиции. Объем: ${positionAmountDecimal.toString()}, Сторона: ${closeSide}.`,
+                );
 
                 // --- Шаг 2: Создание Limit ордера на Закрытие ---
-                const newLimitOrder = await this.executionService.createOrderWithRetry(
+                // НЕ ЖДАТЬ ИСПОЛНЕНИЯ - ордер остается открытым
+                const limitPriceDecimal = new DecimalConstructor(limitPrice.toString());
+
+                const limitCloseOrder = await this.executionService.createOrderWithRetry(
                     pair,
                     'limit',
                     closeSide,
-                    positionAmount,
-                    limitPrice
+                    positionAmountDecimal,
+                    limitPriceDecimal,
                 );
 
-                this.logger.debug(`[${pair}] Limit ордер (Закрытие) ${newLimitOrder.id} создан.`);
+                this.logger.debug(
+                    `[${pair}] Limit ордер (Закрытие) ${limitCloseOrder.id} создан (status: ${limitCloseOrder.status || 'open'}).`,
+                );
 
                 // --- Шаг 3: Атомарная Запись Ордера в БД ---
-                // (Мы НЕ удаляем позицию, т.к. ордер еще не исполнен)
+                // Мы НЕ удаляем позицию, т.к. ордер еще не исполнен
+                const orderAny = limitCloseOrder as any;
+                const orderPrice = orderAny.price || limitPriceDecimal;
+                const orderPriceDecimal = new DecimalConstructor(orderPrice.toString());
 
                 await client.query(
                     `INSERT INTO ActiveOrders (
                         exchange_order_id, pair, status, type, side, price, amount
-                     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT (exchange_order_id) DO UPDATE SET
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (exchange_order_id) DO UPDATE SET
                         status = excluded.status,
                         price = excluded.price,
-                        amount = excluded.amount
-                    `,
+                        amount = excluded.amount`,
                     [
-                        newLimitOrder.id, pair, newLimitOrder.status,
-                        'limit_close', // (Наш внутренний тип)
-                        newLimitOrder.side, newLimitOrder.price, newLimitOrder.amount
-                    ]
+                        limitCloseOrder.id,
+                        pair,
+                        limitCloseOrder.status || 'open',
+                        'limit_close', // Наш внутренний тип
+                        closeSide,
+                        orderPriceDecimal.toNumber(),
+                        positionAmountDecimal.toNumber(),
+                    ],
                 );
 
-                this.logger.info(`[${pair}] Атомарная транзакция (CLOSE Limit) УСПЕШНА.`);
-
-                return newLimitOrder;
+                this.logger.info(
+                    `[${pair}] Атомарная транзакция (CLOSE Limit) УСПЕШНА. Ордер ${limitCloseOrder.id} сохранен как limit_close.`,
+                );
             });
         }
 
@@ -767,16 +782,18 @@
 
 30. **\[7.3 Step 5: DB\]** _Внутри_ транзакции `INSERT INTO TradeHistory` (для записи _выхода_).
 
-31. **(НОВОЕ - 7.3.1) \[Transaction (Критично)\]** `_handleCloseLimitPosition` _полностью_ обернут в `this.dbService.executeInTransaction()`.
+31. **(НОВОЕ - 7.3.1) \[Transaction (Критично)\]** `_handleCloseLimitPosition` _полностью_ обернут в `this.databaseService.executeInTransaction()` (использует `PoolClient` вместо `TransactionClient`).
 
-32. **(НОВОЕ - 7.3.1) \[Step 1: Get Position\]** _Внутри_ транзакции `_handleCloseLimitPosition` _сначала_ делает `SELECT ... FROM ActivePositions ... FOR UPDATE`.
+32. **(НОВОЕ - 7.3.1) \[Step 1: Get Position\]** _Внутри_ транзакции `_handleCloseLimitPosition` _сначала_ делает `SELECT amount, side FROM ActivePositions WHERE pair = $1 FOR UPDATE`.
 
-33. **(НОВОЕ - 7.3.1) \[Step 1: Robustness\]** Добавлена проверка `rowCount === 0` (ошибка синхронизации) после `SELECT`.
+33. **(НОВОЕ - 7.3.1) \[Step 1: Robustness\]** Добавлена проверка `!positionResult.rowCount || positionResult.rowCount === 0` (ошибка синхронизации) после `SELECT`.
 
-34. **(НОВОЕ - 7.3.1) \[Step 2: Validation\]** Добавлена проверка `if (!limitPrice)`, бросающая `Error`.
+34. **(НОВОЕ - 7.3.1) \[Step 2: Validation\]** Добавлена проверка `if (!limitPrice)`, бросающая `Error` с сообщением о необходимости параметра 'price'.
 
-35. **(НОВОЕ - 7.3.1) \[Step 3: Create Order\]** `_handleCloseLimitPosition` вызывает `this.executionService.createOrderWithRetry` (с `type: 'limit'`, `closeSide`, `positionAmount`, `limitPrice`).
+35. **(НОВОЕ - 7.3.1) \[Step 3: Create Order\]** `_handleCloseLimitPosition` вызывает `this.executionService.createOrderWithRetry` (с `type: 'limit'`, `closeSide`, `positionAmountDecimal`, `limitPriceDecimal`). Ордер НЕ ожидает исполнения - остается открытым.
 
-36. **(НОВОЕ - 7.3.1) \[Step 4: DB (Критично)\]** _Внутри_ транзакции `_handleCloseLimitPosition` _только_ добавляет (`INSERT ... ON CONFLICT ...`) в `ActiveOrders` с `type = 'limit_close'`.
+36. **(НОВОЕ - 7.3.1) \[Step 4: DB (Критично)\]** _Внутри_ транзакции `_handleCloseLimitPosition` _только_ добавляет (`INSERT ... ON CONFLICT (exchange_order_id) DO UPDATE SET ...`) в `ActiveOrders` с `type = 'limit_close'`, используя `limitCloseOrder.status || 'open'` и преобразование цен/amount через `DecimalConstructor` и `.toNumber()`.
 
-37. **(НОВОЕ - 7.3.1) \[Step 4: DB (Критично)\]** `_handleCloseLimitPosition` **НЕ** удаляет из `ActivePositions` или `TSL_State`.
+37. **(НОВОЕ - 7.3.1) \[Step 4: DB (Критично)\]** `_handleCloseLimitPosition` **НЕ** удаляет из `ActivePositions` или `TSL_State` (позиция остается открытой до исполнения limit ордера).
+
+38. **(НОВОЕ - 7.3.1) \[Return Type\]** `_handleCloseLimitPosition` возвращает `Promise<void>` вместо `Promise<Order | null>`.

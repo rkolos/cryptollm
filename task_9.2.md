@@ -56,30 +56,60 @@
            * *внутри* защищенной очереди (актора).
            */
           public async reconcileStateForPair(pair: string): Promise<void> {
-              try {
-                  // (Критично) Оборачиваем вызов в execute
-                  await this.pairActorManager.execute(pair, () => this._internalReconcile(pair));
-              } catch (error) {
-                  // Ошибка уже в _internalReconcile
-                  this.logger.error(`[${pair}] КРИТИЧЕСКАЯ ОШИБКА во время сверки: ${error.message}`);
-                  // Ошибка не пробрасывается дальше,
-                  // чтобы не остановить `reconcileStateAll`
-              }
+              this.logger.debug(`[${pair}] (SyncEngine) Задача на сверку [${pair}] добавлена в очередь...`);
+
+              // (Критично - Задача 9.2) Оборачиваем всю логику в execute
+              await this.pairActorManager.execute(pair, async () => {
+                  this.logger.info(`[${pair}] (SyncEngine) Сверка [${pair}] ЗАПУЩЕНА.`);
+
+                  // Получаем "сырые" данные о состоянии параллельно через Promise.allSettled
+                  const results = await Promise.allSettled([
+                      this.exchangeService.fetchOpenOrders(pair),
+                      this.databaseService.query('SELECT * FROM ActiveOrders WHERE pair = $1', [pair]),
+                      this.databaseService.query('SELECT * FROM ActivePositions WHERE pair = $1', [pair]),
+                      this.exchangeService.fetchBalance(),
+                  ]);
+
+                  // ... (Вся логика сверки из Задач 5.1, 5.1.1, 5.1.2)
+                  // Обработка ошибок и сверка ордеров/позиций
+              });
           }
 
           /**
            * (Публичный метод) Выполняет сверку для *всех* пар в watchlist.
            * Вызывается из SlowCycleService.
            */
-          public async reconcileStateAll(watchlist: string[]): Promise<void> {
+          public async reconcileStateAll(): Promise<void> {
+              const watchlist = this.configService.getWatchlist();
               this.logger.info(`Запуск плановой сверки для ${watchlist.length} пар...`);
 
-              // (Критично) Мы `await` каждую сверку.
-              // Это гарантирует, что `SlowCycle` не запустит
-              // следующую итерацию `reconcileStateAll`, пока
-              // текущая не завершена.
+              // Используем for...of для последовательного выполнения,
+              // чтобы распределить нагрузку на API биржи во времени.
+              // Добавляем таймаут для каждой пары, чтобы зависание одной пары не блокировало остальные
               for (const pair of watchlist) {
-                  await this.reconcileStateForPair(pair);
+                  // Добавляем задержку между парами, чтобы не перегружать API (500ms между парами)
+                  if (watchlist.indexOf(pair) > 0) {
+                      await new Promise((resolve) => setTimeout(resolve, 500));
+                  }
+                  try {
+                      // Таймаут 60 секунд на пару - если сверка зависла или ждет слишком долго, пропускаем
+                      const reconcilePromise = this.reconcileStateForPair(pair);
+                      const timeoutPromise = new Promise<void>((_, reject) => {
+                          setTimeout(() => {
+                              reject(new Error(`Таймаут сверки для пары ${pair} (60 секунд)`));
+                          }, 60000); // 60 секунд на пару
+                      });
+
+                      await Promise.race([reconcilePromise, timeoutPromise]);
+                  } catch (error) {
+                      const errorMessage = error instanceof Error ? error.message : String(error);
+                      if (errorMessage.includes('Таймаут')) {
+                          this.logger.warn(`[${pair}] Сверка превысила таймаут (60s). Пропускаем эту пару.`);
+                      } else {
+                          this.logger.error(`[${pair}] Ошибка при сверке:`, error);
+                      }
+                      // Продолжаем со следующей парой
+                  }
               }
 
               this.logger.info("Плановая сверка завершена.");
@@ -112,60 +142,86 @@
           private async runStopLossJanitor(): Promise<void> {
               this.logger.info("Запуск [StopLossJanitor]...");
 
-              const state = this.accountState.getAccountState(); // (из 4.5)
-              const activePositions = state.open_positions || [];
+              const accountState = this.accountStateService.getAccountState();
+              const activePositions = accountState.open_positions || [];
 
               for (const position of activePositions) {
                   const pair = position.pair;
-                  const slPrice = new Decimal(position.stop_loss_price);
+                  const slPrice = new DecimalConstructor(position.stop_loss_price.toString());
 
-                  // (Критично) Получаем *реальную* текущую цену
-                  const ticker = this.fastCycleService.getTicker(pair);
+                  // (Критично) Получаем *реальную* текущую цену из MarketDataService
+                  const ticker = await this.exchangeService.fetchTicker(pair);
                   if (!ticker) continue;
 
-                  const currentPrice = new Decimal(ticker.last);
+                  const currentPrice = new DecimalConstructor(ticker.last.toString());
 
                   let isSlBreached = false;
                   if (position.side === 'long' && currentPrice.lessThan(slPrice)) {
                       isSlBreached = true;
+                  } else if (position.side === 'short' && currentPrice.greaterThan(slPrice)) {
+                      isSlBreached = true;
                   }
-                  // ... (логика для 'short')
 
-                  if (isSlBreached) {
-                      this.logger.fatal(`[${pair}] [StopLossJanitor] ОБНАРУЖЕНО ПРОБИТИЕ SL! Цена: ${currentPrice}, SL: ${slPrice}. Запускаем аварийное закрытие...`);
+                  // Проверяем наличие открытого SL ордера
+                  const openOrders = await this.exchangeService.fetchOpenOrders(pair);
+                  const hasOpenSlOrder = openOrders.some((order) => {
+                      // Проверка на stop_loss_limit ордер
+                      return order.type === 'stop_loss_limit' || order.info?.type === 'STOP_LOSS_LIMIT';
+                  });
 
-                      try {
-                          // (Критично) Оборачиваем вызов Worker'a в execute
-                          // Мы `await`, чтобы заблокировать `SlowCycle`
-                          // до завершения аварийного закрытия.
-                          await this.pairActorManager.execute(pair, async () => {
-                              // (Задача 5.2.1)
-                              // 1. Отправляем PUSH
-                              await this.notificationService.sendAlert(`FATAL [${pair}]: StopLossJanitor! Breach detected! Closing position.`, true);
+                  if (isSlBreached && !hasOpenSlOrder) {
+                      this.logger.error(
+                          `(StopLossJanitor) [${pair}] ФАТАЛЬНАЯ ОШИБКА: Цена ${currentPrice.toString()} ПРОБИЛА SL ${slPrice.toString()}, но позиция НЕ ЗАКРЫТА! Запуск принудительного закрытия.`,
+                      );
 
-                              // 2. Вызываем Worker'a напрямую
-                              // (Мы не можем ждать LLM)
-                              const decision: CloseDecision = {
-                                  action: 'CLOSE_POSITION',
+                      // (Критично) Вызываем pairActorManager.execute БЕЗ await (fire-and-forget)
+                      this.pairActorManager
+                          .execute(pair, async () => {
+                              await this.notificationService.sendAlert(
+                                  `[${pair}] ФАТАЛЬНАЯ ОШИБКА Stop-Loss Janitor: Цена ${currentPrice.toString()} пробила SL ${slPrice.toString()}, но позиция не закрыта! Принудительное закрытие.`,
+                                  true,
+                              );
+
+                              // Создаем решение для принудительного закрытия
+                              const closeDecision = {
+                                  action: 'CLOSE_POSITION' as const,
                                   pair: pair,
                                   parameters: {
-                                      type: 'market',
-                                      amount_percent: 100
-                                  }
+                                      type: 'market' as const,
+                                      amount_percent: 100,
+                                  },
+                                  justification: 'Принудительное закрытие из-за пробития Stop-Loss (Stop-Loss Janitor)',
                               };
 
-                              // Вызываем Worker (без LLM Log ID)
-                              await this.workerService.execute(decision, null);
+                              // Подготовка данных для WorkerService
+                              const accountStateForWorker = this.accountStateService.getAccountState();
+                              const riskRules = this.configService.getRiskRules();
+                              const strategyContext = {
+                                  risk_rules: {
+                                      default_risk_per_trade_percent: riskRules.defaultRiskPercent,
+                                      max_allowed_risk_per_trade_percent: riskRules.maxAllowedRiskPercent,
+                                      max_total_portfolio_risk_percent: riskRules.maxTotalPortfolioRiskPercent,
+                                      desired_risk_reward_ratio: riskRules.desiredRiskRewardRatio,
+                                  },
+                              };
+                              const tickerForWorker = await this.exchangeService.fetchTicker(pair);
+                              const marketData = {
+                                  pair: pair,
+                                  current_price: tickerForWorker.last,
+                              };
+
+                              // Вызываем workerService.execute (llmLogId пустой для Stop-Loss Janitor)
+                              await this.workerService.execute(closeDecision, '', accountStateForWorker, strategyContext, marketData);
+                          })
+                          .catch((actorError) => {
+                              this.logger.error(
+                                  `(StopLossJanitor) [${pair}] Ошибка в акторе при принудительном закрытии:`,
+                                  actorError,
+                              );
+                              // (Критично) Паузим бота при ошибке
+                              this.globalStateService.pause();
+                              this.notificationService.sendAlert(`FATAL [${pair}]: StopLossJanitor FAILED. PAUSING BOT.`, true);
                           });
-
-                          this.logger.info(`[${pair}] [StopLossJanitor] Аварийное закрытие завершено.`);
-
-                      } catch (error) {
-                          this.logger.error(`[${pair}] [StopLossJanitor] Ошибка аварийного закрытия: ${error.message}`);
-                          // (Критично) Паузим бота
-                          await this.globalState.pause();
-                          await this.notificationService.sendAlert(`FATAL [${pair}]: StopLossJanitor FAILED. PAUSING BOT.`, true);
-                      }
                   }
               }
           }
@@ -182,9 +238,10 @@
 
 ## 4\. Критерии Приемки (Acceptance Criteria)
 
-1.  **\[SyncEngine\]** `SyncEngineService` внедряет `PairActorManagerService`.
-2.  **\[SyncEngine (Критично)\]** Публичный метод `reconcileStateForPair(pair)` **обертывает** всю свою внутреннюю логику (5.1, 5.1.1, 5.1.2) в `pairActorManager.execute()`.
-3.  **\[SyncEngine\]** Метод `reconcileStateAll()` вызывает `await reconcileStateForPair()` _в цикле_ (сериализованно по парам).
-4.  **\[StopLossJanitor\]** `SlowCycleService` (или где реализован "Janitor") внедряет `PairActorManagerService`.
-5.  **\[StopLossJanitor (Критично)\]** Логика аварийного закрытия позиции (вызов `WorkerService.execute` и `NotificationService.sendAlert`) **обернута** в `pairActorManager.execute(position.pair, ...)`.
-6.  **\[await\]** Все вызовы `pairActorManager.execute` в "Медленном Цикле" используются с `await`, чтобы блокировать цикл до завершения задачи.
+1.  **\[SyncEngine\]** `SyncEngineService` внедряет `PairActorManagerService` через DI (конструктор принимает `pairActorManager: PairActorManagerService`).
+2.  **\[SyncEngine (Критично)\]** Публичный метод `reconcileStateForPair(pair)` **обертывает** всю свою внутреннюю логику (5.1, 5.1.1, 5.1.2) в `await pairActorManager.execute(pair, async () => { ... })`. Логика получает данные параллельно через `Promise.allSettled` для `fetchOpenOrders`, `query ActiveOrders`, `query ActivePositions`, `fetchBalance`.
+3.  **\[SyncEngine\]** Метод `reconcileStateAll()` получает watchlist через `configService.getWatchlist()`, вызывает `reconcileStateForPair()` _в цикле_ с задержкой 500ms между парами и использует `Promise.race` с таймаутом 60 секунд на пару для предотвращения зависания.
+4.  **\[StopLossJanitor\]** `SlowCycleService` внедряет `PairActorManagerService` через DI (конструктор принимает `pairActorManager: PairActorManagerService`).
+5.  **\[StopLossJanitor (Критично)\]** Логика аварийного закрытия позиции (вызов `WorkerService.execute` и `NotificationService.sendAlert`) **обернута** в `pairActorManager.execute(position.pair, async () => { ... })` **БЕЗ** `await` (fire-and-forget) с обработкой ошибок через `.catch()`.
+6.  **\[StopLossJanitor\]** Логика проверяет наличие открытого SL ордера через `fetchOpenOrders` перед принудительным закрытием.
+7.  **\[StopLossJanitor\]** При ошибке в акторе `SlowCycleService` вызывает `globalStateService.pause()` и отправляет уведомление.

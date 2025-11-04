@@ -46,20 +46,18 @@
         - Получить `const state = this.accountStateService.getAccountState();`
         - Получить `const tslRule = state.tslRules.get(pair);`
         - **Если `!tslRule`:** `return;` (Для этой пары нет TSL, выходим).
-        - Получить `const currentPrice = new Decimal(ticker.last);`
+        - Получить `const currentPriceDecimal = ticker.last as any;`
+        - Получить `const currentPrice = new DecimalConstructor(currentPriceDecimal.toString());`
         - **Вызвать приватный обработчик логики:** `const requiredUpdate = this._calculateTSL(tslRule, currentPrice);`
-        - **Если `requiredUpdate` (возвращает `newStopPrice`):**
-          - `this.logger.info(`(TSLHandler) \[${pair}\] TSL UPDATE: Цена ${currentPrice}. Двигаем SL с ${tslRule.state.currentStopPrice} на ${requiredUpdate.newStopPrice}`);`
+        - **Если `requiredUpdate` (возвращает объект с `newStopPrice` и `newPriceSeen`):**
+          - `this.logger.info(`(TSLHandler) [${pair}] TSL UPDATE: Цена ${currentPrice.toString()}. Двигаем SL с ${tslRule.state.currentStopPrice.toString()} на ${requiredUpdate.newStopPrice.toString()}`);`
           - **(Задача 9.3) Вызов "Актора" (Fire-and-Forget):**
-          - `this.pairActorManager.execute(pair, async () => { ... })` (Вызвать _без_ `await`):
-            - `(async () => {`
-            - `await this._updateStopLossOrder(pair, tslRule, requiredUpdate.newStopPrice, currentPrice);`
-            - `});`
+          - `this.pairActorManager.execute(pair, async () => { ... }).catch((e) => { ... })` (Вызвать _без_ `await`):
+            - Внутри актора: `await this._updateStopLossOrder(pair, tslRule, requiredUpdate.newStopPrice, currentPrice);`
+            - В `.catch()`: залогировать `error` об ошибке актора.
 
-          - `.catch((e) => { ... (Логировать ошибку "актора", Задача 9.1) ... });`
-
-      - **`} catch (e: any) {`**
-        - `this.logger.error(`(TSLHandler) \[${ticker.symbol}\] КРИТИЧЕСКИЙ СБОЙ: ${e.message}`, e.stack);`
+      - **`} catch (error) {`**
+        - `this.logger.error(`(TSLHandler) [${ticker.symbol}] КРИТИЧЕСКИЙ СБОЙ: ${String(error)}`, error);`
         - `// (Не бросаем ошибку, чтобы не "убить" WS-цикл)`
 
       - **`}`**
@@ -68,13 +66,16 @@
 
 - **Нюанс реализации:** Чистая, синхронная функция, использующая `decimal.js`.
 - **Логика (согласно `about.md`):**
-  1.  `(Логика для 'long' позиции)`
-  2.  `if (tslRule.position.side === 'long' && currentPrice.greaterThan(tslRule.state.highestPrice))`
-  3.  `const newStopPrice = currentPrice.times(new Decimal(1).minus(tslRule.rule.distance.dividedBy(100)));`
-  4.  `if (newStopPrice.greaterThan(tslRule.state.currentStopPrice))`
-  5.  `return { newStopPrice, newHighestPrice: currentPrice };`
-  6.  `(Аналогичная логика для 'short' позиции, используя` lowestPrice`)`
-  7.  `return null;` (Обновление не требуется).
+  1.  Извлечь `const { position, state, rule } = tslRule;`
+  2.  **Для 'long' позиции:**
+      - Если `currentPrice.greaterThan(state.priceSeen)`:
+        - Рассчитать `newStopPrice = currentPrice.times(one.minus(distancePercent))`, где `distancePercent = rule.distance.dividedBy(100)`.
+        - Если `newStopPrice.greaterThan(state.currentStopPrice)`, вернуть `{ newStopPrice, newPriceSeen: currentPrice }`.
+  3.  **Для 'short' позиции:**
+      - Если `currentPrice.lessThan(state.priceSeen)`:
+        - Рассчитать `newStopPrice = currentPrice.times(one.plus(distancePercent))`.
+        - Если `newStopPrice.lessThan(state.currentStopPrice)`, вернуть `{ newStopPrice, newPriceSeen: currentPrice }`.
+  4.  `return null;` (Обновление не требуется).
 
 ### 4.5. Приватный Метод `private async _updateStopLossOrder(pair, tslRule, newStopPrice, currentPrice)`
 
@@ -84,14 +85,16 @@
       - `await this.guaranteedExecutor.cancelOrderWithRetry(tslRule.state.currentStopOrderId, pair);`
 
   2.  **Шаг 2. Создание Нового SL (Гарантированно):**
-      - Получить `const newSlOrder = await this.guaranteedExecutor.createStopLossOrderWithRetry(pair, tslRule.position.amount, newStopPrice, ...);`
+      - Определить `const oppositeSide: 'buy' | 'sell' = position.side === 'long' ? 'sell' : 'buy';`
+      - Вызвать `await this.guaranteedExecutor.createOrderWithRetry(pair, 'stop_loss_limit', oppositeSide, position.amount, newStopPrice, { stopPrice: newStopPrice.toString() })`.
+      - Залогировать `info` о создании нового SL ордера.
 
   3.  **Шаг 3. Атомарное Обновление БД (Критично):**
       - `await this.dbService.executeInTransaction(async (client) => { ... })`
       - **Внутри транзакции:**
         - **1\. Обновить `TSL_State`:**
-          - `UPDATE TSL_State SET currentStopPrice = $1, highestPrice = $2 (или lowestPrice), currentStopOrderId = $3 WHERE pair = $4`
-          - (Передать `newStopPrice`, `currentPrice`, `newSlOrder.id`, `pair`)
+          - `UPDATE TSL_State SET current_stop_price = $1, current_stop_order_id = $2, price_seen = $3, updated_at = NOW() WHERE pair = $4`
+          - (Передать `newStopPrice.toString()`, `newSlOrder.id`, `currentPrice.toString()`, `pair`)
 
         - **2\. Удалить старый `ActiveOrders`:**
           - `DELETE FROM ActiveOrders WHERE exchange_order_id = $1`
@@ -105,7 +108,7 @@
 
 1.  Service
 
-    `TSLHandlerService.ts` создан и корректно принимает все 5 зависимостей (включая `AccountStateService` и `PairActorManagerService`).
+    `TSLHandlerService.ts` создан как Singleton с методом `getInstance(accountStateService, pairActorManager, guaranteedExecutor, databaseService)` и корректно принимает все 4 зависимости.
 
 2.  **\[Dependency\]** `AccountStateService` (4.5) _обновлен_ для включения `TSL_State` в свой `in-memory` кэш, доступный через `getAccountState()`.
 3.  **\[API\]** `handleTicker(ticker)` _не_ является `async` и _не_ содержит `await` верхнего уровня.
@@ -121,4 +124,8 @@
 
 12. **\[Actor (Step 3)\]** `_updateStopLossOrder` _корректно_ вызывает `await this.dbService.executeInTransaction()`.
 
-13. **\[Actor (DB)\]** Транзакция _корректно_ и _атомарно_ выполняет 3 DML-операции: `UPDATE TSL_State`, `DELETE ActiveOrders` (старый), `INSERT ActiveOrders` (новый).
+13. **\[Actor (DB)\]** Транзакция _корректно_ и _атомарно_ выполняет 3 DML-операции: `UPDATE TSL_State` (с обновлением `current_stop_price`, `current_stop_order_id`, `price_seen`, `updated_at`), `DELETE ActiveOrders` (старый), `INSERT ActiveOrders` (новый).
+
+14. **\[ErrorHandling\]** Если транзакция БД провалилась, `_updateStopLossOrder` отменяет новый SL ордер на бирже через `cancelOrderWithRetry` для предотвращения "зомби" ордера.
+
+15. **\[CalculateTSL\]** Метод `_calculateTSL` использует `state.priceSeen` вместо `state.highestPrice`/`state.lowestPrice` для сравнения цен.

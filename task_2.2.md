@@ -31,7 +31,7 @@
 1.  **Логика:** Разработчик _обязан_ добавить в `package.json` скрипты, которые абстрагируют `node-pg-migrate` и наш "раннер".
 2.  **Нюанс реализации:**
     - `"migrate:create": "npx node-pg-migrate create --migration-file-language ts --verbose"` (Используем CLI только для _создания_ файлов).
-    - `"migrate:run": "npx ts-node ./scripts/migrate.ts"` (Наш кастомный "раннер").
+    - `"migrate:run": "tsx ./scripts/migrate.ts"` (Наш кастомный "раннер", использует tsx вместо ts-node для ESM поддержки).
     - `"migrate:up": "npm run migrate:run -- up"`
     - `"migrate:down": "npm run migrate:run -- down"`
 
@@ -39,12 +39,13 @@
 
 1.  **Логика:** Разработчик _обязан_ создать `scripts/migrate.ts`.
 2.  **Нюанс реализации (Критично):**
-    - Этот скрипт _обязан_ импортировать `dotenv/config` _в самом верху_.
+    - Этот скрипт _обязан_ импортировать `'dotenv/config'` _в самом верху_ для загрузки переменных окружения.
     - Он _обязан_ импортировать и _синхронно_ загрузить `ConfigService.load()`.
-    - Он _обязан_ получить `const dbConfig = ConfigService.getInstance().getDatabaseConfig()`.
-    - Он _обязан_ спарсить `process.argv[2]` для получения `direction` ('up' или 'down').
+    - Он _обязан_ получить `const dbConfig = ConfigService.getInstance().getDbConfig()` (метод называется `getDbConfig`, а не `getDatabaseConfig`).
+    - Он _обязан_ спарсить `process.argv[2]` для получения `direction` ('up' или 'down') и проверить валидность. Если направление не указано или неверно, вывести ошибку и завершить с `process.exit(1)`.
     - Он _обязан_ сформировать `databaseUrl` из `dbConfig`.
-    - Он _обязан_ вызвать `await run(options)` (из `node-pg-migrate`), передав ему `databaseUrl`, `direction`, `dir: 'migrations'` и `migrationsTable: 'pgmigrations'`.
+    - Он _обязан_ вызвать `await runner(options)` (из `node-pg-migrate`), передав ему `databaseUrl`, `direction`, `dir: 'migrations'`, `migrationsTable: 'pgmigrations'` и `count: Infinity`.
+    - **Нюанс:** Используется `runner` вместо `run` для программного запуска миграций. Параметр `count: Infinity` указывает, что нужно выполнить все ожидающие миграции.
     - Он _обязан_ корректно обрабатывать `try/catch` и выходить с `process.exit(1)` в случае ошибки.
 
 ### 4.3. Первая Миграция (`001_initial_schema`)
@@ -52,9 +53,9 @@
 1.  **Логика:** Разработчик _обязан_ создать и настроить первую миграцию.
 2.  **Нюанс реализации:**
     - **Шаг 1 (Папка):** Создать папку `migrations/sql/`.
-    - **Шаг 2 (Артефакт):** Взять _весь_ DDL-код из `task-2.1-db-schema-design.md` и сохранить его в `migrations/sql/001_initial_schema.sql`.
+    - **Шаг 2 (Артефакт):** Взять _весь_ DDL-код из `task-2.1-db-schema-design.md` и сохранить его в `migrations/sql/001_initial_schema.sql`. Добавить комментарии в SQL файл для описания назначения каждой таблицы.
     - **Шаг 3 (Генерация):** Выполнить `npm run migrate:create -- initial-schema`. Это создаст файл `migrations/<timestamp>_initial-schema.ts`.
-    - **Шаг 4 (Реализация `up`):** `up()` в `.ts` файле _обязан_ использовать `fs.readFileSync` для чтения `001_initial_schema.sql` и выполнить его через `await pgm.sql(sql)`.
+    - **Шаг 4 (Реализация `up`):** `up()` в `.ts` файле _обязан_ использовать `readFileSync` из `fs` для чтения `001_initial_schema.sql` и выполнить его через `await pgm.sql(sql)`. Путь к SQL файлу должен быть вычислен относительно `__dirname` с использованием `fileURLToPath` и `dirname` для поддержки ESM.
     - **Шаг 5 (Реализация `down` - Критично):** `down()` _обязан_ содержать `await pgm.sql('DROP TABLE IF EXISTS "TableName";')` для _всех 6 таблиц_, созданных в 2.1 (`LLM_Decision_Log`, `TradeHistory`, `LLM_Triggers`, `TSL_State`, `ActiveOrders`, `ActivePositions`). Порядок `DROP` важен, если бы были FK (Foreign Keys), но для идемпотентности `down` должен удалять всё.
 
 ## 5\. Критерии Приемки (Acceptance Criteria)

@@ -462,18 +462,68 @@ export class WatcherOrchestratorService {
                   const finalStatus = logCheckResult.rows[0].decision_result;
                   const validatorErrorMessage = logCheckResult.rows[0].validator_error_message;
 
-                  // Проверяем, было ли автоматическое исполнение
+                  // Проверяем, было ли автоматическое/локальное исполнение
                   const isAutoExecution =
                     validatorErrorMessage &&
                     (validatorErrorMessage.includes('АВТОМАТИЧЕСКОЕ ИСПОЛНЕНИЕ') ||
+                      validatorErrorMessage.includes('ЛОКАЛЬНОЕ ВЫПОЛНЕНИЕ') ||
                       validatorErrorMessage.includes('✅'));
 
-                  // Если это было автоматическое исполнение, не отправляем повторный запрос
-                  if (isAutoExecution) {
+                  // Проверяем, является ли это ошибкой превышения баланса
+                  const isBalanceError =
+                    validatorErrorMessage &&
+                    (validatorErrorMessage.includes('превышает доступный баланс') ||
+                      validatorErrorMessage.includes('превышает'));
+
+                  // Если решение было успешно принято (accepted), не отправляем повторный запрос
+                  if (finalStatus === 'accepted') {
+                    this.logger.info(
+                      `[${pair}] Решение было успешно принято и исполнено. Повторный запрос к LLM не требуется.`,
+                    );
+                    // Пропускаем всю логику переспрашивания для успешно исполненных сделок
+                  } else if (isAutoExecution) {
+                    // Если это было автоматическое/локальное исполнение, не отправляем повторный запрос
                     this.logger.info(
                       `[${pair}] Решение было автоматически исполнено. Повторный запрос к LLM не требуется.`,
                     );
                     // Пропускаем всю логику переспрашивания для автоматически исполненных сделок
+                  } else if (isBalanceError) {
+                    // Если это ошибка превышения баланса, не отправляем повторный запрос к модели
+                    // Вместо этого валидатор должен был автоматически создать сделку с предустановленным процентом
+                    // Если локальное исполнение не сработало (слишком малый баланс), повторный запрос все равно не нужен
+                    this.logger.info(
+                      `[${pair}] Ошибка превышения баланса. Повторный запрос к LLM не требуется (валидатор должен был создать сделку с предустановленным процентом).`,
+                    );
+
+                    // Если локальное исполнение не сработало (статус rejected_by_validator), удаляем триггеры
+                    if (finalStatus === 'rejected_by_validator') {
+                      const openPositionDecisions = llmResponse.decisions.filter(
+                        (d) => d.action === 'OPEN_LONG' || d.action === 'OPEN_SHORT',
+                      );
+
+                      const pairsToClean = new Set<string>();
+                      openPositionDecisions.forEach((d) => pairsToClean.add(d.pair));
+                      if (llmResponse.update_triggers_for_pair) {
+                        pairsToClean.add(llmResponse.update_triggers_for_pair);
+                      }
+
+                      for (const pairToClean of pairsToClean) {
+                        this.logger.warn(
+                          `[${pair}] Ошибка превышения баланса, локальное исполнение не сработало. Удаление триггеров для пары ${pairToClean}...`,
+                        );
+                        await this.databaseService.query('DELETE FROM llm_triggers WHERE pair = $1', [pairToClean]);
+                        this.logger.info(
+                          `[${pair}] Триггеры удалены для пары ${pairToClean} из-за ошибки превышения баланса.`,
+                        );
+                      }
+
+                      this.notificationService.sendAlert(
+                        `⚠️ [${pair}] Ошибка превышения баланса. Локальное исполнение не сработало (возможно, баланс слишком мал). Триггеры для ${Array.from(pairsToClean).join(', ')} удалены.`,
+                        false,
+                      );
+                    }
+
+                    // Пропускаем логику переспрашивания
                   } else if (finalStatus === 'rejected_by_validator') {
                     // Если решение на открытие позиции отклонено валидатором, удаляем триггеры
                     // (WorkerService обновляет статус на 'rejected_by_validator' при отклонении)

@@ -289,7 +289,7 @@
             workerError: string | null
         ): Promise<void> {
             try {
-                await this.dbService.query(
+                await this.databaseService.query(
                     `UPDATE LLM_Decision_Log
                      SET
                         decision_result = $2,
@@ -298,33 +298,34 @@
                      WHERE id = $1`,
                     [logId, status, validatorError, workerError]
                 );
-            } catch (dbError: any) {
-                this.logger.error(`[FATAL] Не удалось обновить LLM_Decision_Log (ID: ${logId}): ${dbError.message}`);
+            } catch (dbError) {
+                const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
+                this.logger.error(`[FATAL] Не удалось обновить LLM_Decision_Log (ID: ${logId}): ${errorMessage}`);
             }
         }
 
         // --- (ЗАГЛУШКИ: Будут реализованы в 7.2 - 7.5) ---
 
-        private async handleOpenPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async handleOpenPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<IDecimalOrder | null> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleOpenPosition...`);
             // (Логика Задачи 7.2 / 7.2.1 будет здесь)
-            // (e.g., this.dbService.executeInTransaction(async (client) => { ... }))
+            // (e.g., this.databaseService.executeInTransaction(async (client) => { ... }))
             return null;
         }
 
-        private async handleClosePosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async handleClosePosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<IDecimalOrder | null> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleClosePosition...`);
             // (Логика Задачи 7.3 / 7.3.1 будет здесь)
             return null;
         }
 
-        private async handleModifyPosition(decision: LLMDecision, validationResult: ValidationResult): Promise<Order | null> {
+        private async handleModifyPosition(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<IDecimalOrder | null> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleModifyPosition...`);
             // (Логика Задачи 7.4 будет здесь)
             return null;
         }
 
-        private async handleCancelOrders(decision: LLMDecision, validationResult: ValidationResult): Promise<void> {
+        private async handleCancelOrders(decision: LLMDecision, validationResult: CalculatedAmounts): Promise<void> {
             this.logger.debug(`[${decision.pair}] (STUB) Вызов handleCancelOrders...`);
             // (Логика Задачи 7.5 будет здесь)
         }
@@ -332,23 +333,40 @@
 
 ## 5\. Критерии Приемки (Acceptance Criteria)
 
-1.  **\[Interface\]** `src/interfaces/types.ts` дополнен типами `LLMDecisionParameters`, `LLMAction`, `LLMDecision` и `ValidationResult`.
-2.  **\[Service\]** `WorkerService.ts` (Singleton) создан и корректно принимает _все 9 зависимостей_ (Validator, Execution, DB, EventBus, Notification, GlobalState, AccountState, ExchangeRules, Config).
-3.  **\[Signature (Архитектура)\]** `execute()` имеет _корректную_ сигнатуру, принимающую `(decision, logId, accountState, strategyContext, marketData)`.
-4.  **\[Logic (Шаг 1 - Успех)\]** `execute()` _сначала_ вызывает `validatorService.validateDecision()`.
-5.  **\[Logic (Шаг 1 - Провал)\]** Если `Validator` бросает `Error`, `execute()` **немедленно** входит в `catch (validationError)`, вызывает `_updateDecisionLog` (с `rejected_by_validator`), `notificationService.sendAlert` и **завершается** (`return`).
-6.  **\[Logic (Шаг 2 - Успех)\]** Если `Validator` успешен, `execute()` вызывает `switch (decision.action)` и (STUB) `handle...` методы.
-7.  **\[Logic (Шаг 2 - Успех)\]** После `handle...` (в `try`), `execute()` вызывает `_updateDecisionLog` (с `accepted`), `notificationService.sendAlert` (с `includeAccountState: true`).
-8.  **\[Logic (Шаг 2 - Провал)\]** Если `handle...` (в `try`) бросает `Error`, `execute()` **немедленно** входит в `catch (executionError)`.
-9.  **\[Logic (Шаг 2 - Провал)\]** В `catch (executionError)`, `execute()` вызывает `_updateDecisionLog` (с `failed_by_worker`) и `notificationService.sendAlert` (с `includeAccountState: true`).
-10. **\[Robustness (План 7.1)\]** В `catch (executionError)` есть `if (executionError instanceof ccxt.InsufficientFundsError)`.
+1.  **\[Interface\]** Типы `LLMDecision`, `LLMAction`, `LLMDecisionParameters` находятся в `src/interfaces/ILLMTypes.ts`. Тип `CalculatedAmounts` находится в `src/interfaces/IValidatorTypes.ts` (используется вместо `ValidationResult`).
 
-11. **\[Robustness (План 7.1)\]** Этот `if` _корректно_ вызывает `globalStateService.pause()` и `accountStateService.refreshNow()`.
+2.  **\[Service\]** `WorkerService.ts` (Singleton) создан с методом `getInstance(validatorService, executionService, databaseService, eventBus, notificationService, globalStateService, accountStateService, exchangeRulesService, exchangeService, configService)` и корректно принимает _все 10 зависимостей_.
 
-12. **\[Robustness\]** `catch (executionError)` _повторно_ бросает (`throw`) ошибку, чтобы `PairActorManager` (Эпик 9) мог ее обработать.
+3.  **\[Signature (Архитектура)\]** `execute()` имеет _корректную_ сигнатуру, принимающую `(decision, llm_decision_log_id, accountState, strategyContext, marketData)`.
 
-13. **\[EventBus (Задача 7.1.3)\]** При _успешном_ исполнении (в `try`), `execute()` вызывает `eventBus.emit('trade_executed', pair)`.
+4.  **\[Logic (Шаг 1 - HOLD)\]** `execute()` проверяет `if (decision.action === 'HOLD')` и пропускает валидацию, логируя `debug`.
 
-14. **\[DB Logic\]** `_updateDecisionLog` корректно формирует `UPDATE` SQL-запрос.
+5.  **\[Logic (Шаг 1 - Успех)\]** `execute()` _сначала_ вызывает `validatorService.validateDecision(decision, accountState, strategyContext, marketData, exchangeRules)` и сохраняет результат в `validationResult: CalculatedAmounts | null`.
 
-15. **\[Stubs\]** Приватные "заглушки" (`handleOpenPosition`, `handleClosePosition` и т.д.) созданы и готовы к реализации в 7.2-7.5.
+6.  **\[Logic (Шаг 1 - Локальное Выполнение)\]** Если `Validator` бросает `ValidationError` с сообщением о превышении баланса для `OPEN_LONG`/`OPEN_SHORT`, `execute()` пытается выполнить локальное выполнение с пересчетом размера позиции, автоматической установкой SL/TP и проверкой minNotional.
+
+7.  **\[Logic (Шаг 1 - Провал)\]** Если локальное выполнение не удалось или не применимо, `execute()` вызывает `_updateDecisionLog` (с `rejected_by_validator`), `notificationService.sendAlert` и **завершается** (`return`).
+
+8.  **\[Logic (Шаг 2 - Успех)\]** Если `Validator` успешен (или локальное выполнение успешно), `execute()` вызывает `switch (decision.action)` и (STUB) `handle...` методы.
+
+9.  **\[Logic (Шаг 2 - Cache Update)\]** После каждого `handle...` (для `OPEN_LONG`, `OPEN_SHORT`, `CLOSE_POSITION`, `MODIFY_POSITION`) `execute()` вызывает `accountStateService.refreshNow()` в `try/catch` для обновления кэша.
+
+10. **\[Logic (Шаг 2 - Успех)\]** После `handle...` (в `try`), `execute()` вызывает `_updateDecisionLog` (с `accepted`), `eventBus.emit('trade_executed', pair)` и `notificationService.sendAlert` (с `includeAccountState: true`).
+
+11. **\[Logic (Шаг 2 - Провал)\]** Если `handle...` (в `try`) бросает `Error`, `execute()` **немедленно** входит в `catch (executionError)`.
+
+12. **\[Logic (Шаг 2 - Провал)\]** В `catch (executionError)`, `execute()` извлекает `errorMessage` и вызывает `_updateDecisionLog` (с `failed_by_worker`) и `notificationService.sendAlert` (с `includeAccountState: true`).
+
+13. **\[Robustness (План 7.1)\]** В `catch (executionError)` есть `if (executionError instanceof InsufficientFundsError)` (кастомный класс из `ExchangeErrors`).
+
+14. **\[Robustness (План 7.1)\]** Этот `if` _корректно_ вызывает `globalStateService.pause()`, `notificationService.sendAlert` с FATAL сообщением и `accountStateService.refreshNow()`.
+
+15. **\[Robustness\]** `catch (executionError)` _повторно_ бросает (`throw`) ошибку, чтобы `PairActorManager` (Эпик 9) мог ее обработать.
+
+16. **\[EventBus (Задача 7.1.3)\]** При _успешном_ исполнении (в `try`), `execute()` вызывает `eventBus.emit('trade_executed', pair)`.
+
+17. **\[DB Logic\]** `_updateDecisionLog` корректно формирует `UPDATE` SQL-запрос с использованием `databaseService.query()` и обрабатывает ошибки через `try/catch`.
+
+18. **\[Stubs\]** Приватные "заглушки" (`handleOpenPosition`, `handleClosePosition`, `handleModifyPosition`, `handleCancelOrders`) принимают `CalculatedAmounts` вместо `ValidationResult` и возвращают `IDecimalOrder | null` или `Promise<void>`.
+
+19. **\[LogIdShort\]** Для логирования используется короткая версия `llm_decision_log_id.substring(0, 8)`.
